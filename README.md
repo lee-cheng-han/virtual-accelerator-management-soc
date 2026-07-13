@@ -6,8 +6,9 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Phase 0 — Complete (specification only).** No hardware, firmware,
-> kernel driver, or working demo is implemented yet. Phase 1 is planned.
+> Status: **Specifications complete; minimal RV32 subsystem implemented.** The
+> QEMU machine and bare-metal firmware boot through UART, SRAM, and timer IRQ
+> checks. PCIe, DMA, Zephyr, the kernel driver, and the full demo remain planned.
 
 ## Architecture
 
@@ -36,7 +37,7 @@ completion rings, explicit ownership indices, MSI-X with polling fallback,
 generation-tagged resets, and layered health management. The mailbox is an
 internal management peripheral, not the host datapath.
 
-## Phase 0 deliverables
+## Current deliverables
 
 - Normative scope and requirements
 - Host, device, firmware, queue, interrupt, and recovery architecture
@@ -44,23 +45,37 @@ internal management peripheral, not the host datapath.
 - Little-endian 64-byte submission and 32-byte completion ABI
 - Firmware task and command lifecycle design
 - Verification, performance, demo, and milestone plans
+- Out-of-tree QEMU `vams_riscv` RV32 machine patch
+- Freestanding boot firmware with UART, SRAM, and machine-timer checks
+- Automated QEMU boot-transcript smoke test
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
 
 ## Build and validation
 
-Phase 0 needs a POSIX shell, GNU Make, `grep`, and `find`:
+Documentation checks need a POSIX shell, GNU Make, `grep`, and `find`:
 
 ```sh
 make check
 make tree
 ```
 
-There is nothing to compile yet. `make demo` intentionally reports that the
-full demo is unavailable until Phase 10. Future toolchain dependencies include
-QEMU build prerequisites, a RISC-V cross compiler, Zephyr SDK/west, and Linux
-kernel headers; exact supported versions will be pinned when introduced.
+The minimal firmware additionally needs a bare-metal RISC-V GCC toolchain. Its
+QEMU machine is carried as an out-of-tree patch; detailed integration and smoke
+test commands are in the
+[minimal RISC-V subsystem guide](docs/minimal-riscv-subsystem.md).
+
+```sh
+make firmware CROSS_COMPILE=riscv64-unknown-elf-
+make smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+```
+
+`make demo` reports that the full PCIe accelerator demo is not implemented.
+Future dependencies include the Zephyr SDK/west and Linux kernel headers; exact
+supported versions will be pinned when those components are introduced.
 
 ## Specification map
 
@@ -78,19 +93,20 @@ kernel headers; exact supported versions will be pinned when introduced.
 | [Verification plan](docs/verification-plan.md) | Test layers and traceability |
 | [Performance plan](docs/performance-plan.md) | Metrics and reproducible method |
 | [Demo](docs/demo.md) | Current and final demo contracts |
+| [Minimal RISC-V subsystem](docs/minimal-riscv-subsystem.md) | QEMU and firmware bring-up contract |
 
 ## Planned repository areas
 
 `qemu/` holds out-of-tree device-model work and tests; `firmware/` holds the
-`vams_riscv` Zephyr board and management application; `kernel/` stays a thin
+`vams_riscv` firmware and future Zephyr board/application; `kernel/` stays a thin
 `vams_pci` transport; `userspace/` holds `libvams`, `vamsctl`, and benchmarks;
-and top-level `tests/` holds end-to-end suites. Empty Phase 1 directories are
-present locally as scaffolding and gain tracked files only when implemented.
+and top-level `tests/` holds end-to-end suites. Unimplemented directories are
+scaffolding and gain tracked files only when their components are built.
 
 ## Known limitations
 
-- All behavior described beyond Phase 0 is a design target, not a claim of
-  implementation.
+- Only the minimal RISC-V subsystem described in its bring-up guide is currently
+  executable; the wider accelerator architecture remains a design target.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is
@@ -101,4 +117,3 @@ present locally as scaffolding and gain tracked files only when implemented.
 ## License
 
 VAMS is available under the MIT License; see [LICENSE](LICENSE).
-

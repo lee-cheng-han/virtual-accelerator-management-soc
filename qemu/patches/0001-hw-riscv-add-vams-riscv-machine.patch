@@ -1,0 +1,168 @@
+Subject: [PATCH] hw/riscv: add VAMS management subsystem machine
+
+Add a deliberately small RV32 machine used to execute the management firmware
+for the Virtual Accelerator Management SoC.  The initial model contains one
+hart, immutable reset ROM, SRAM, a 16550-compatible UART, and ACLINT software
+and timer interrupt sources.
+
+---
+ hw/riscv/Kconfig        |  7 ++++
+ hw/riscv/meson.build    |  1 +
+ hw/riscv/vams_riscv.c   | 121 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 129 insertions(+)
+ create mode 100644 hw/riscv/vams_riscv.c
+
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -119,6 +119,13 @@ config TENSTORRENT
+     select DS1338
+     select TMP105
+ 
++config VAMS_RISCV
++    bool
++    default y
++    depends on RISCV32
++    select RISCV_ACLINT
++    select SERIAL_MM
++
+ config XIANGSHAN_KUNMINGHU
+     bool
+     default y
+diff --git a/hw/riscv/meson.build b/hw/riscv/meson.build
+--- a/hw/riscv/meson.build
++++ b/hw/riscv/meson.build
+@@ -17,6 +17,7 @@ riscv_ss.add(when: 'CONFIG_SPIKE', if_true: files('spike.c'))
+ riscv_ss.add(when: 'CONFIG_MICROCHIP_PFSOC', if_true: files('microchip_pfsoc.c'))
+ riscv_ss.add(when: 'CONFIG_TENSTORRENT', if_true: files('tt_atlantis.c'))
+ riscv_ss.add(when: 'CONFIG_ACPI', if_true: files('virt-acpi-build.c'))
++riscv_ss.add(when: 'CONFIG_VAMS_RISCV', if_true: files('vams_riscv.c'))
+ riscv_ss.add(when: 'CONFIG_RISCV_IOMMU', if_true: files(
+ 	'riscv-iommu.c', 'riscv-iommu-pci.c', 'riscv-iommu-sys.c', 'riscv-iommu-hpm.c'))
+ riscv_ss.add(when: 'CONFIG_MICROBLAZE_V', if_true: files('microblaze-v-generic.c'))
+diff --git a/hw/riscv/vams_riscv.c b/hw/riscv/vams_riscv.c
+new file mode 100644
+--- /dev/null
++++ b/hw/riscv/vams_riscv.c
+@@ -0,0 +1,121 @@
++/*
++ * Virtual Accelerator Management SoC - RISC-V management subsystem
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/cutils.h"
++#include "qapi/error.h"
++#include "qemu/error-report.h"
++#include "hw/char/serial-mm.h"
++#include "hw/core/boards.h"
++#include "hw/intc/riscv_aclint.h"
++#include "hw/riscv/boot.h"
++#include "hw/riscv/machines-qom.h"
++#include "hw/riscv/riscv_hart.h"
++#include "system/system.h"
++#include "target/riscv/cpu-qom.h"
++
++#define TYPE_VAMS_RISCV_MACHINE MACHINE_TYPE_NAME("vams_riscv")
++OBJECT_DECLARE_SIMPLE_TYPE(VamsRiscvMachineState, VAMS_RISCV_MACHINE)
++
++enum {
++    VAMS_ROM_BASE = 0x00001000,
++    VAMS_ROM_SIZE = 0x00010000,
++    VAMS_ACLINT_SWI_BASE = 0x02000000,
++    VAMS_ACLINT_MTIMER_BASE = 0x02004000,
++    VAMS_UART_BASE = 0x10000000,
++    VAMS_SRAM_BASE = 0x80000000,
++    VAMS_SRAM_SIZE = 0x00080000,
++};
++
++struct VamsRiscvMachineState {
++    MachineState parent_obj;
++    RISCVHartArrayState cpus;
++    MemoryRegion rom;
++};
++
++static void vams_riscv_machine_init(MachineState *machine)
++{
++    MachineClass *mc = MACHINE_GET_CLASS(machine);
++    VamsRiscvMachineState *s = VAMS_RISCV_MACHINE(machine);
++    MemoryRegion *system_memory = get_system_memory();
++    RISCVBootInfo boot_info;
++    hwaddr firmware_load_addr = VAMS_SRAM_BASE;
++
++    if (machine->ram_size != mc->default_ram_size) {
++        g_autofree char *size = size_to_str(mc->default_ram_size);
++
++        error_report("vams_riscv requires exactly %s of SRAM", size);
++        exit(EXIT_FAILURE);
++    }
++    if (!machine->firmware || !strcmp(machine->firmware, "none")) {
++        error_report("vams_riscv requires an explicit -bios firmware image");
++        exit(EXIT_FAILURE);
++    }
++
++    object_property_set_str(OBJECT(&s->cpus), "cpu-type", machine->cpu_type,
++                            &error_abort);
++    object_property_set_int(OBJECT(&s->cpus), "num-harts", 1, &error_abort);
++    object_property_set_int(OBJECT(&s->cpus), "resetvec", VAMS_ROM_BASE,
++                            &error_abort);
++    sysbus_realize(SYS_BUS_DEVICE(&s->cpus), &error_fatal);
++
++    memory_region_add_subregion(system_memory, VAMS_SRAM_BASE, machine->ram);
++    memory_region_init_rom(&s->rom, NULL, "vams.riscv.rom",
++                           VAMS_ROM_SIZE, &error_fatal);
++    memory_region_add_subregion(system_memory, VAMS_ROM_BASE, &s->rom);
++
++    riscv_aclint_swi_create(VAMS_ACLINT_SWI_BASE, 0, 1, false);
++    riscv_aclint_mtimer_create(VAMS_ACLINT_MTIMER_BASE,
++                               RISCV_ACLINT_DEFAULT_MTIMER_SIZE,
++                               0, 1, RISCV_ACLINT_DEFAULT_MTIMECMP,
++                               RISCV_ACLINT_DEFAULT_MTIME,
++                               RISCV_ACLINT_DEFAULT_TIMEBASE_FREQ, false);
++
++    serial_mm_init(system_memory, VAMS_UART_BASE, 0,
++                   qdev_get_gpio_in(DEVICE(&s->cpus.harts[0]), IRQ_M_EXT),
++                   399193, serial_hd(0), DEVICE_LITTLE_ENDIAN);
++
++    riscv_boot_info_init(&boot_info, &s->cpus);
++    riscv_load_firmware(machine, &boot_info, machine->firmware,
++                        &firmware_load_addr, NULL);
++    riscv_setup_rom_reset_vec(machine, &s->cpus, firmware_load_addr,
++                              VAMS_ROM_BASE, VAMS_ROM_SIZE, 0, 0);
++}
++
++static void vams_riscv_machine_instance_init(Object *obj)
++{
++    VamsRiscvMachineState *s = VAMS_RISCV_MACHINE(obj);
++
++    object_initialize_child(obj, "cpus", &s->cpus, TYPE_RISCV_HART_ARRAY);
++}
++
++static void vams_riscv_machine_class_init(ObjectClass *oc, const void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->desc = "Virtual Accelerator Management SoC RISC-V subsystem";
++    mc->init = vams_riscv_machine_init;
++    mc->max_cpus = 1;
++    mc->default_cpu_type = TYPE_RISCV_CPU_BASE32;
++    mc->default_ram_id = "vams.riscv.sram";
++    mc->default_ram_size = VAMS_SRAM_SIZE;
++}
++
++static const TypeInfo vams_riscv_machine_type_info = {
++    .name = TYPE_VAMS_RISCV_MACHINE,
++    .parent = TYPE_MACHINE,
++    .instance_size = sizeof(VamsRiscvMachineState),
++    .instance_init = vams_riscv_machine_instance_init,
++    .class_init = vams_riscv_machine_class_init,
++    .interfaces = riscv32_machine_interfaces,
++};
++
++static void vams_riscv_machine_register_types(void)
++{
++    type_register_static(&vams_riscv_machine_type_info);
++}
++
++type_init(vams_riscv_machine_register_types)
