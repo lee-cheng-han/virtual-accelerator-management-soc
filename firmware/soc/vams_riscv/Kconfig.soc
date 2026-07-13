@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+
+config SOC_VAMS_RISCV
+	bool
+
+config SOC
+	default "vams_riscv" if SOC_VAMS_RISCV

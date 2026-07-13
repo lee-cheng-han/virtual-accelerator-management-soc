@@ -1,0 +1,6 @@
+board:
+  name: vams_riscv
+  full_name: VAMS RISC-V Management Subsystem
+  vendor: vams
+  socs:
+    - name: vams_riscv

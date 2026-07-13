@@ -6,9 +6,10 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Specifications complete; minimal RV32 subsystem implemented.** The
-> QEMU machine and bare-metal firmware boot through UART, SRAM, and timer IRQ
-> checks. PCIe, DMA, Zephyr, the kernel driver, and the full demo remain planned.
+> Status: **RV32 subsystem and Zephyr board port implemented.** The custom QEMU
+> machine runs both bare-metal bring-up firmware and two-task Zephyr firmware
+> with timer-driven message-queue heartbeats. PCIe, DMA, management peripherals,
+> the kernel driver, and the full demo remain planned.
 
 ## Architecture
 
@@ -48,6 +49,8 @@ internal management peripheral, not the host datapath.
 - Out-of-tree QEMU `vams_riscv` RV32 machine patch
 - Freestanding boot firmware with UART, SRAM, and machine-timer checks
 - Automated QEMU boot-transcript smoke test
+- Out-of-tree Zephyr `vams_riscv` board and SoC definitions
+- Two communicating Zephyr tasks with timer-driven heartbeat smoke coverage
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -73,6 +76,16 @@ make smoke \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 ```
 
+The RTOS target uses pinned Zephyr v4.4.0 source and a repository-local Python
+environment:
+
+```sh
+make zephyr-prepare
+make zephyr-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+```
+
 `make demo` reports that the full PCIe accelerator demo is not implemented.
 Future dependencies include the Zephyr SDK/west and Linux kernel headers; exact
 supported versions will be pinned when those components are introduced.
@@ -94,6 +107,7 @@ supported versions will be pinned when those components are introduced.
 | [Performance plan](docs/performance-plan.md) | Metrics and reproducible method |
 | [Demo](docs/demo.md) | Current and final demo contracts |
 | [Minimal RISC-V subsystem](docs/minimal-riscv-subsystem.md) | QEMU and firmware bring-up contract |
+| [Zephyr board port](docs/zephyr-board-port.md) | RTOS board, timer, task IPC, and validation |
 
 ## Planned repository areas
 
@@ -105,8 +119,8 @@ scaffolding and gain tracked files only when their components are built.
 
 ## Known limitations
 
-- Only the minimal RISC-V subsystem described in its bring-up guide is currently
-  executable; the wider accelerator architecture remains a design target.
+- Only the RISC-V subsystem and Zephyr board port described in their bring-up
+  guides are currently executable; the wider accelerator remains a design target.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

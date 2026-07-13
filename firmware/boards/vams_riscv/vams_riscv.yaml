@@ -1,0 +1,16 @@
+identifier: vams_riscv
+name: VAMS RISC-V Management Subsystem
+type: qemu
+simulation:
+  - name: qemu
+arch: riscv
+toolchain:
+  - cross-compile
+  - zephyr
+ram: 512
+flash: 0
+vendor: vams
+supported:
+  - uart
+testing:
+  default: true

@@ -18,8 +18,10 @@ Implemented:
   machine-timer interrupt test;
 - a smoke test that verifies the complete boot transcript.
 
-Not implemented here: PCIe, BAR registers, DMA, accelerator engines, Zephyr,
-the Linux driver, userspace, watchdog behavior, or the production queue ABI.
+Not implemented in this subsystem: PCIe, BAR registers, DMA, accelerator
+engines, the Linux driver, userspace, watchdog behavior, or the production
+queue ABI. The subsequent Zephyr port is documented separately in the
+[Zephyr board guide](zephyr-board-port.md).
 
 ## Platform contract
 
