@@ -1,0 +1,39 @@
+# Build output
+build/
+out/
+*.o
+*.a
+*.so
+*.ko
+*.mod*
+*.cmd
+Module.symvers
+modules.order
+
+# Firmware and QEMU artifacts
+*.elf
+*.bin
+*.hex
+*.map
+*.dtb
+*.dts.pre
+zephyr/.config
+zephyr/include/generated/
+
+# Test and analysis output
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+coverage/
+test-results/
+
+# Editors and local configuration
+.cache/
+.clangd/
+.idea/
+.vscode/
+*~
+*.swp
+.DS_Store
+
