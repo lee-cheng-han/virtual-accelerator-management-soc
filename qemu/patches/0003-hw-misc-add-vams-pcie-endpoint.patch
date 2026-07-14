@@ -1,0 +1,495 @@
+Subject: [PATCH] hw/misc: add VAMS PCIe endpoint
+
+Add the host-facing VAMS PCIe function with the 4 KiB BAR0 identity and
+control contract, two MSI-X vectors, strict MMIO error reporting, asynchronous
+device reset, and migratable state.  Only the implemented MSI-X capability is
+advertised; queues, DMA, and accelerator operations remain disabled.
+
+---
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index eab8d30403..67546a1b91 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -227,6 +227,11 @@ config VIRT_CTRL
+ config VAMS_MGMT
+     bool
+
++config VAMS_PCIE
++    bool
++    default y if PCI_DEVICES
++    depends on PCI && MSI_NONBROKEN
++
+ config LASI
+     bool
+     select LASI_82596
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 9b3c6d9ed0..b8d1c060ca 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -27,6 +27,7 @@ system_ss.add(when: 'CONFIG_IOSB', if_true: files('iosb.c'))
+ # virt devices
+ system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
+ system_ss.add(when: 'CONFIG_VAMS_MGMT', if_true: files('vams_mgmt.c'))
++system_ss.add(when: 'CONFIG_VAMS_PCIE', if_true: files('vams_pcie.c'))
+
+ # RISC-V devices
+ system_ss.add(when: 'CONFIG_MCHP_PFSOC_DMC', if_true: files('mchp_pfsoc_dmc.c'))
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+new file mode 100644
+index 0000000000..aa613ec035
+--- /dev/null
++++ b/hw/misc/vams_pcie.c
+@@ -0,0 +1,430 @@
++/*
++ * Virtual Accelerator Management SoC PCIe endpoint
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "hw/misc/vams_pcie.h"
++#include "hw/pci/msix.h"
++#include "hw/pci/pcie.h"
++#include "migration/vmstate.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++
++#define VAMS_VENDOR_ID 0x1b36
++#define VAMS_DEVICE_ID 0x1100
++#define VAMS_REVISION 0x00
++#define VAMS_PROCESSING_ACCELERATOR_CLASS 0x1200
++
++#define VAMS_BAR0_SIZE 0x1000
++#define VAMS_MSIX_VECTORS 2
++#define VAMS_MSIX_BAR 1
++#define VAMS_PCIE_CAP_OFFSET 0x80
++#define VAMS_DEVICE_RESET_DELAY_MS 1
++
++enum {
++    VAMS_REG_DEVICE_ID = 0x000,
++    VAMS_REG_HW_IF_VERSION = 0x004,
++    VAMS_REG_FW_VERSION = 0x008,
++    VAMS_REG_DESC_VERSION = 0x00c,
++    VAMS_REG_CAPABILITIES = 0x010,
++    VAMS_REG_MAX_TRANSFER = 0x014,
++    VAMS_REG_QUEUE_LIMITS = 0x018,
++    VAMS_REG_DEVICE_STATUS = 0x01c,
++    VAMS_REG_DEVICE_CONTROL = 0x020,
++    VAMS_REG_ERROR_STATUS = 0x024,
++    VAMS_REG_RESET_GENERATION = 0x028,
++    VAMS_REG_LAST_FATAL = 0x02c,
++    VAMS_REG_INTR_STATUS = 0x300,
++    VAMS_REG_INTR_MASK = 0x304,
++    VAMS_REG_INTR_FORCE = 0x308,
++    VAMS_REG_INTR_COALESCE = 0x30c,
++};
++
++enum {
++    VAMS_CAP_MSIX = BIT(1),
++    VAMS_STATUS_READY = BIT(0),
++    VAMS_STATUS_RESETTING = BIT(4),
++    VAMS_CONTROL_ENABLE = BIT(0),
++    VAMS_CONTROL_RESET = BIT(1),
++    VAMS_CONTROL_QUIESCE = BIT(2),
++    VAMS_ERROR_ILLEGAL_MMIO = BIT(0),
++    VAMS_ERROR_RESERVED_WRITE = BIT(1),
++    VAMS_ERROR_RO_WRITE = BIT(2),
++    VAMS_ERROR_BAD_CONFIG = BIT(3),
++    VAMS_ERROR_FATAL = BIT(9),
++    VAMS_INTR_CQ = BIT(0),
++    VAMS_INTR_ERROR = BIT(1),
++    VAMS_INTR_FW_EVENT = BIT(2),
++    VAMS_INTR_RESET_DONE = BIT(3),
++};
++
++#define VAMS_CONTROL_DEFINED \
++    (VAMS_CONTROL_ENABLE | VAMS_CONTROL_RESET | VAMS_CONTROL_QUIESCE)
++#define VAMS_ERROR_DEFINED 0x000003ff
++#define VAMS_INTR_DEFINED 0x0000000f
++
++struct VamsPcieState {
++    PCIDevice parent_obj;
++    MemoryRegion bar0;
++    QEMUTimer *reset_timer;
++
++    uint32_t device_status;
++    uint32_t device_control;
++    uint32_t error_status;
++    uint32_t reset_generation;
++    uint32_t last_fatal;
++    uint32_t intr_status;
++    uint32_t intr_mask;
++    uint32_t intr_coalesce;
++};
++
++static void vams_pcie_notify(VamsPcieState *s, uint32_t pending)
++{
++    PCIDevice *pdev = PCI_DEVICE(s);
++    uint32_t deliver = pending & ~s->intr_mask;
++
++    if (deliver & VAMS_INTR_CQ) {
++        msix_notify(pdev, 0);
++    }
++    if (deliver & (VAMS_INTR_ERROR | VAMS_INTR_FW_EVENT |
++                   VAMS_INTR_RESET_DONE)) {
++        msix_notify(pdev, 1);
++    }
++}
++
++static void vams_pcie_raise_interrupt(VamsPcieState *s, uint32_t sources)
++{
++    uint32_t newly_pending = sources & ~s->intr_status;
++
++    s->intr_status |= sources;
++    vams_pcie_notify(s, newly_pending);
++}
++
++static void vams_pcie_set_error(VamsPcieState *s, uint32_t error)
++{
++    s->error_status |= error;
++    vams_pcie_raise_interrupt(s, VAMS_INTR_ERROR);
++}
++
++static void vams_pcie_reset_complete(void *opaque)
++{
++    VamsPcieState *s = opaque;
++
++    s->device_status = VAMS_STATUS_READY;
++    vams_pcie_raise_interrupt(s, VAMS_INTR_RESET_DONE);
++}
++
++static void vams_pcie_device_reset(VamsPcieState *s)
++{
++    int vector;
++
++    if (s->device_status & VAMS_STATUS_RESETTING) {
++        vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++        return;
++    }
++
++    s->device_control = 0;
++    s->device_status = VAMS_STATUS_RESETTING;
++    s->error_status &= VAMS_ERROR_FATAL;
++    s->reset_generation++;
++    s->intr_status = 0;
++    s->intr_mask = VAMS_INTR_DEFINED;
++    s->intr_coalesce = 1;
++    for (vector = 0; vector < VAMS_MSIX_VECTORS; vector++) {
++        msix_clr_pending(PCI_DEVICE(s), vector);
++    }
++    timer_mod(s->reset_timer,
++              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
++              VAMS_DEVICE_RESET_DELAY_MS);
++}
++
++static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
++                                    unsigned int size)
++{
++    VamsPcieState *s = opaque;
++
++    if (size != 4 || (offset & 3) != 0) {
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        return UINT64_MAX;
++    }
++
++    switch (offset) {
++    case VAMS_REG_DEVICE_ID:
++        return (VAMS_DEVICE_ID << 16) | VAMS_VENDOR_ID;
++    case VAMS_REG_HW_IF_VERSION:
++        return 0x00010000;
++    case VAMS_REG_FW_VERSION:
++        return 0;
++    case VAMS_REG_DESC_VERSION:
++        return 1;
++    case VAMS_REG_CAPABILITIES:
++        return VAMS_CAP_MSIX;
++    case VAMS_REG_MAX_TRANSFER:
++        return 0x01000000;
++    case VAMS_REG_QUEUE_LIMITS:
++        return 0x04000010;
++    case VAMS_REG_DEVICE_STATUS:
++        return s->device_status;
++    case VAMS_REG_DEVICE_CONTROL:
++        return s->device_control;
++    case VAMS_REG_ERROR_STATUS:
++        return s->error_status;
++    case VAMS_REG_RESET_GENERATION:
++        return s->reset_generation;
++    case VAMS_REG_LAST_FATAL:
++        return s->last_fatal;
++    case VAMS_REG_INTR_STATUS:
++        return s->intr_status;
++    case VAMS_REG_INTR_MASK:
++        return s->intr_mask;
++    case VAMS_REG_INTR_FORCE:
++        return 0;
++    case VAMS_REG_INTR_COALESCE:
++        return s->intr_coalesce;
++    default:
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_PCIE ": invalid BAR0 read at 0x%"
++                      HWADDR_PRIx "\n", offset);
++        return UINT32_MAX;
++    }
++}
++
++static void vams_pcie_write_ro(VamsPcieState *s)
++{
++    vams_pcie_set_error(s, VAMS_ERROR_RO_WRITE);
++}
++
++static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
++                                 unsigned int size)
++{
++    VamsPcieState *s = opaque;
++    uint32_t value32 = value;
++    uint32_t reserved;
++
++    if (size != 4 || (offset & 3) != 0) {
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        return;
++    }
++
++    switch (offset) {
++    case VAMS_REG_DEVICE_ID:
++    case VAMS_REG_HW_IF_VERSION:
++    case VAMS_REG_FW_VERSION:
++    case VAMS_REG_DESC_VERSION:
++    case VAMS_REG_CAPABILITIES:
++    case VAMS_REG_MAX_TRANSFER:
++    case VAMS_REG_QUEUE_LIMITS:
++    case VAMS_REG_DEVICE_STATUS:
++    case VAMS_REG_RESET_GENERATION:
++    case VAMS_REG_LAST_FATAL:
++        vams_pcie_write_ro(s);
++        return;
++    case VAMS_REG_DEVICE_CONTROL:
++        reserved = value32 & ~VAMS_CONTROL_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        if (value32 & VAMS_CONTROL_RESET) {
++            vams_pcie_device_reset(s);
++            return;
++        }
++        if (value32 & VAMS_CONTROL_ENABLE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++        }
++        s->device_control = value32 & VAMS_CONTROL_QUIESCE;
++        return;
++    case VAMS_REG_ERROR_STATUS:
++        reserved = value32 & ~VAMS_ERROR_DEFINED;
++        s->error_status &= ~(value32 & VAMS_ERROR_DEFINED);
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        return;
++    case VAMS_REG_INTR_STATUS:
++        reserved = value32 & ~VAMS_INTR_DEFINED;
++        s->intr_status &= ~(value32 & VAMS_INTR_DEFINED);
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        return;
++    case VAMS_REG_INTR_MASK: {
++        uint32_t old_mask = s->intr_mask;
++
++        reserved = value32 & ~VAMS_INTR_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        s->intr_mask = value32 & VAMS_INTR_DEFINED;
++        vams_pcie_notify(s, s->intr_status & old_mask & ~s->intr_mask);
++        return;
++    }
++    case VAMS_REG_INTR_FORCE:
++        reserved = value32 & ~VAMS_INTR_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        vams_pcie_raise_interrupt(s, value32 & VAMS_INTR_DEFINED);
++        return;
++    case VAMS_REG_INTR_COALESCE:
++        if (value32 != 1) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->intr_coalesce = value32;
++        return;
++    default:
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_PCIE ": invalid BAR0 write at 0x%"
++                      HWADDR_PRIx "\n", offset);
++    }
++}
++
++static const MemoryRegionOps vams_pcie_bar0_ops = {
++    .read = vams_pcie_bar0_read,
++    .write = vams_pcie_bar0_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 1,
++        .max_access_size = 8,
++        .unaligned = true,
++    },
++    .impl = {
++        .min_access_size = 1,
++        .max_access_size = 8,
++        .unaligned = true,
++    },
++};
++
++static const VMStateDescription vams_pcie_vmstate = {
++    .name = TYPE_VAMS_PCIE,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
++        VMSTATE_MSIX(parent_obj, VamsPcieState),
++        VMSTATE_TIMER_PTR(reset_timer, VamsPcieState),
++        VMSTATE_UINT32(device_status, VamsPcieState),
++        VMSTATE_UINT32(device_control, VamsPcieState),
++        VMSTATE_UINT32(error_status, VamsPcieState),
++        VMSTATE_UINT32(reset_generation, VamsPcieState),
++        VMSTATE_UINT32(last_fatal, VamsPcieState),
++        VMSTATE_UINT32(intr_status, VamsPcieState),
++        VMSTATE_UINT32(intr_mask, VamsPcieState),
++        VMSTATE_UINT32(intr_coalesce, VamsPcieState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static void vams_pcie_reset(DeviceState *dev)
++{
++    VamsPcieState *s = VAMS_PCIE(dev);
++
++    timer_del(s->reset_timer);
++    s->device_status = VAMS_STATUS_READY;
++    s->device_control = 0;
++    s->error_status = 0;
++    s->reset_generation = 0;
++    s->last_fatal = 0;
++    s->intr_status = 0;
++    s->intr_mask = VAMS_INTR_DEFINED;
++    s->intr_coalesce = 1;
++}
++
++static void vams_pcie_realize(PCIDevice *pdev, Error **errp)
++{
++    VamsPcieState *s = VAMS_PCIE(pdev);
++    int ret;
++    int vector;
++
++    memory_region_init_io(&s->bar0, OBJECT(s), &vams_pcie_bar0_ops, s,
++                          TYPE_VAMS_PCIE ".bar0", VAMS_BAR0_SIZE);
++    pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
++
++    ret = pcie_endpoint_cap_init(pdev, VAMS_PCIE_CAP_OFFSET);
++    if (ret < 0) {
++        error_setg(errp, "failed to initialize VAMS PCIe capability");
++        return;
++    }
++
++    ret = msix_init_exclusive_bar(pdev, VAMS_MSIX_VECTORS,
++                                  VAMS_MSIX_BAR, errp);
++    if (ret < 0) {
++        pcie_cap_exit(pdev);
++        return;
++    }
++
++    for (vector = 0; vector < VAMS_MSIX_VECTORS; vector++) {
++        msix_vector_use(pdev, vector);
++    }
++}
++
++static void vams_pcie_exit(PCIDevice *pdev)
++{
++    int vector;
++
++    for (vector = 0; vector < VAMS_MSIX_VECTORS; vector++) {
++        msix_vector_unuse(pdev, vector);
++    }
++    msix_uninit_exclusive_bar(pdev);
++    pcie_cap_exit(pdev);
++}
++
++static void vams_pcie_init(Object *obj)
++{
++    VamsPcieState *s = VAMS_PCIE(obj);
++
++    PCI_DEVICE(obj)->cap_present |= QEMU_PCI_CAP_EXPRESS;
++    s->reset_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                  vams_pcie_reset_complete, s);
++}
++
++static void vams_pcie_finalize(Object *obj)
++{
++    VamsPcieState *s = VAMS_PCIE(obj);
++
++    timer_free(s->reset_timer);
++}
++
++static void vams_pcie_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);
++
++    pc->realize = vams_pcie_realize;
++    pc->exit = vams_pcie_exit;
++    pc->vendor_id = VAMS_VENDOR_ID;
++    pc->device_id = VAMS_DEVICE_ID;
++    pc->revision = VAMS_REVISION;
++    pc->class_id = VAMS_PROCESSING_ACCELERATOR_CLASS;
++    pc->subsystem_vendor_id = VAMS_VENDOR_ID;
++    pc->subsystem_id = VAMS_DEVICE_ID;
++    dc->desc = "Virtual Accelerator Management SoC PCIe endpoint";
++    dc->vmsd = &vams_pcie_vmstate;
++    device_class_set_legacy_reset(dc, vams_pcie_reset);
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++}
++
++static const TypeInfo vams_pcie_info = {
++    .name = TYPE_VAMS_PCIE,
++    .parent = TYPE_PCI_DEVICE,
++    .instance_size = sizeof(VamsPcieState),
++    .instance_init = vams_pcie_init,
++    .instance_finalize = vams_pcie_finalize,
++    .class_init = vams_pcie_class_init,
++    .interfaces = (const InterfaceInfo[]) {
++        { INTERFACE_PCIE_DEVICE },
++        { },
++    },
++};
++
++static void vams_pcie_register_types(void)
++{
++    type_register_static(&vams_pcie_info);
++}
++
++type_init(vams_pcie_register_types)
+diff --git a/include/hw/misc/vams_pcie.h b/include/hw/misc/vams_pcie.h
+new file mode 100644
+index 0000000000..71d2e9efbd
+--- /dev/null
++++ b/include/hw/misc/vams_pcie.h
+@@ -0,0 +1,16 @@
++/*
++ * Virtual Accelerator Management SoC PCIe endpoint
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_MISC_VAMS_PCIE_H
++#define HW_MISC_VAMS_PCIE_H
++
++#include "hw/pci/pci_device.h"
++#include "qom/object.h"
++
++#define TYPE_VAMS_PCIE "vams-pcie"
++OBJECT_DECLARE_SIMPLE_TYPE(VamsPcieState, VAMS_PCIE)
++
++#endif

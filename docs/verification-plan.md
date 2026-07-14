@@ -21,7 +21,7 @@ documentation checks only. Planned tests are not reported as passing.
 |---|---|
 | SYS-01/02 | boot console golden output plus timer/interrupt/reset QTests |
 | SYS-03 | Zephyr boot, task synchronization, mailbox/telemetry, and watchdog-reset tests |
-| PCI-01 | config-space/BAR QTest and guest `lspci`/probe log |
+| PCI-01 | config-space/BAR/MSI-X QTest; guest `lspci`/probe log remains pending |
 | ABI-01/02 | descriptor byte-layout compile test, table-driven validation, ring model/property tests |
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |

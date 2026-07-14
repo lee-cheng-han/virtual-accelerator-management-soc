@@ -23,12 +23,14 @@
 ```
 
 The QEMU integration is maintained as a small out-of-tree patch series until
-interfaces stabilize. `vams-pcie` is a PCIe endpoint connected to QEMU's PCI
-bus and contains a private RISC-V subsystem; it is not a second guest-visible
-machine. The proposed development identity is vendor `0x1b36`, device `0x1100`,
-revision `0x00`, class `0x120000` (processing accelerator). These values are
-provisional QEMU-development identifiers and must not be used as allocated
-production IDs.
+interfaces stabilize. The implemented `vams-pcie` shell connects to QEMU's
+PCIe bus with vendor `0x1b36`, device `0x1100`, revision `0x00`, and class
+`0x120000` (processing accelerator). It currently implements BAR0 identity,
+control/error handling, and MSI-X. The standalone `vams_riscv` machine remains
+the firmware validation harness; the target architecture will embed the same
+management components privately within `vams-pcie`, not expose a second guest
+machine. The development identity is provisional and is not an allocated
+production ID.
 
 ## Address spaces
 

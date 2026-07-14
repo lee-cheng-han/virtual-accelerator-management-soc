@@ -6,10 +6,11 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **RISC-V management control plane implemented.** The custom QEMU
-> machine runs bare-metal and Zephyr firmware with mailbox interrupts,
-> health-gated watchdog recovery, reset-cause retention, and telemetry. PCIe,
-> DMA, the kernel driver, and the full demo remain planned.
+> Status: **Management control plane and QEMU PCIe shell implemented.** The
+> custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
+> watchdog recovery, and telemetry. The host-facing `vams-pcie` endpoint now
+> enumerates with BAR0 and two MSI-X vectors. DMA queues, the kernel driver, and
+> the full demo remain planned.
 
 ## Architecture
 
@@ -53,6 +54,8 @@ internal management peripheral, not the host datapath.
 - Zephyr mailbox and management-control drivers
 - Progress-epoch health supervision, watchdog recovery, and telemetry
 - QTest MMIO, mailbox, and forced-watchdog-reset regressions
+- QEMU `vams-pcie` processing-accelerator endpoint with BAR0 and two MSI-X vectors
+- PCI enumeration, MMIO error, MSI-X pending, and asynchronous-reset QTest
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -95,6 +98,8 @@ make management-smoke \
 make watchdog-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make pcie-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
 `make demo` reports that the full PCIe accelerator demo is not implemented.
@@ -120,6 +125,7 @@ supported versions will be pinned when those components are introduced.
 | [Minimal RISC-V subsystem](docs/minimal-riscv-subsystem.md) | QEMU and firmware bring-up contract |
 | [Zephyr board port](docs/zephyr-board-port.md) | RTOS board, timer, task IPC, and validation |
 | [Management peripherals](docs/management-peripherals.md) | Mailbox, watchdog, reset, telemetry, and tests |
+| [PCIe endpoint](docs/pcie-endpoint.md) | PCI identity, BAR0, MSI-X, reset, and QTest contract |
 
 ## Planned repository areas
 
@@ -131,9 +137,10 @@ scaffolding and gain tracked files only when their components are built.
 
 ## Known limitations
 
-- Only the RISC-V management subsystem and control peripherals described in
-  their guides are currently executable; the wider accelerator remains a
-  design target.
+- The RISC-V management subsystem and PCIe endpoint shell are executable, but
+  they are not connected into one private device instance yet.
+- The endpoint advertises only MSI-X. Queue, DMA, engine, firmware, telemetry,
+  and debug capabilities remain clear until their host-facing paths work.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

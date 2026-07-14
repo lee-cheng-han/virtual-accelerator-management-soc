@@ -4,6 +4,12 @@ This is the normative release-1 host-visible register contract. It describes
 the final release-1 values; an intermediate phase must read capabilities and
 must not advertise a feature until it works.
 
+The current QEMU PCIe shell implements identification/device-control and
+interrupt-control registers. It advertises only capability bit 1 (MSI-X).
+Queue, DMA, watchdog bridge, telemetry snapshot, engine, and debug blocks remain
+unimplemented and therefore return illegal-MMIO behavior. See the
+[PCIe endpoint guide](pcie-endpoint.md) for the exact implemented subset.
+
 ## Global rules
 
 BAR0 is a 4096-byte, non-prefetchable PCI memory BAR. Registers are

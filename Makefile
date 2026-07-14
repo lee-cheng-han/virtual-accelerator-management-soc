@@ -9,10 +9,11 @@ SPEC_DOCS := README.md \
 	docs/command-lifecycle.md docs/fault-recovery.md \
 	docs/verification-plan.md docs/performance-plan.md docs/demo.md \
 	docs/minimal-riscv-subsystem.md docs/zephyr-board-port.md \
-	docs/management-peripherals.md
+	docs/management-peripherals.md docs/pcie-endpoint.md
 
 CROSS_COMPILE ?= riscv64-unknown-elf-
 QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
+QEMU_SYSTEM_X86_64 ?= qemu-system-x86_64
 VAMS_FIRMWARE ?= $(CURDIR)/build/firmware/baremetal/vams-riscv-fw.elf
 ZEPHYR_BASE ?= $(CURDIR)/build/zephyrproject/zephyr
 ZEPHYR_VENV ?= $(CURDIR)/build/zephyr-venv
@@ -23,7 +24,7 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 
 .PHONY: help check check-docs firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
-	watchdog-smoke qemu-patch-check tree clean demo
+	watchdog-smoke pcie-smoke qemu-patch-check tree clean demo
 
 help:
 	@printf '%s\n' \
@@ -43,8 +44,9 @@ help:
 	  '                   Verify the management register contract' \
 	  '  make watchdog-smoke' \
 	  '                   Verify watchdog reset and firmware recovery' \
+	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
-	  '                   Check that the machine patch applies cleanly' \
+	  '                   Check that the QEMU patch series applies cleanly' \
 	  '  make tree        Print the repository tree' \
 	  '  make demo        Explain full-demo availability' \
 	  '  make clean       Remove generated output'
@@ -59,7 +61,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'RISC-V management control plane implemented' README.md; \
+	grep -q 'Management control plane and QEMU PCIe shell implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -134,6 +136,10 @@ watchdog-smoke: zephyr-watchdog
 	VAMS_WATCHDOG_FIRMWARE="$(VAMS_WATCHDOG_FIRMWARE)" \
 	./qemu/tests/smoke-vams-watchdog.sh
 
+pcie-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/smoke-vams-pcie.sh
+
 qemu-patch-check:
 	@test -n "$(QEMU_SRC)" || { \
 		echo 'usage: make qemu-patch-check QEMU_SRC=/path/to/qemu' >&2; \
@@ -149,6 +155,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0001-hw-riscv-add-vams-riscv-machine.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0002-hw-add-vams-management-peripherals.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0002-hw-add-vams-management-peripherals.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

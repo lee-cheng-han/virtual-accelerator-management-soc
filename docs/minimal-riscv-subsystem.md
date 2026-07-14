@@ -72,11 +72,15 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0001-hw-riscv-add-vams-riscv-machine.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0002-hw-add-vams-management-peripherals.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"
 ```
 
-Configure that tree with the `riscv32-softmmu` target and build
-`qemu-system-riscv32` using the normal QEMU build procedure. The patch adds the
-machine name `vams_riscv`; it does not modify an installed system QEMU.
+Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both
+the management machine and PCIe endpoint validation targets. Build
+`qemu-system-riscv32` and `qemu-system-x86_64` using the normal QEMU build
+procedure. The series adds the machine name `vams_riscv` and device type
+`vams-pcie`; it does not modify an installed system QEMU.
 
 ## Validate the boot
 
