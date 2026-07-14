@@ -3,9 +3,8 @@
 ## Status and scope
 
 The repository contains a bootable RV32 management subsystem consisting of an
-out-of-tree QEMU machine patch and a freestanding firmware image. This is a
-bring-up target for the management CPU, not yet the PCIe accelerator model or
-the Zephyr control plane.
+out-of-tree QEMU patch series, freestanding bring-up firmware, and a Zephyr
+control plane. It is not yet the PCIe accelerator model.
 
 Implemented:
 
@@ -18,10 +17,12 @@ Implemented:
   machine-timer interrupt test;
 - a smoke test that verifies the complete boot transcript.
 
-Not implemented in this subsystem: PCIe, BAR registers, DMA, accelerator
-engines, the Linux driver, userspace, watchdog behavior, or the production
-queue ABI. The subsequent Zephyr port is documented separately in the
-[Zephyr board guide](zephyr-board-port.md).
+The QEMU machine also implements the firmware-facing mailbox, watchdog, reset,
+and telemetry regions. Those behaviors and the Zephyr drivers are documented
+in the [management-peripheral contract](management-peripherals.md) and
+[Zephyr board guide](zephyr-board-port.md). PCIe, BAR registers, DMA,
+accelerator engines, the Linux driver, userspace, and the production queue ABI
+remain outside this subsystem.
 
 ## Platform contract
 
@@ -31,6 +32,8 @@ queue ABI. The subsequent Zephyr port is documented separately in the
 | ACLINT software interrupt | `0x02000000` | 16 KiB | Machine software interrupt |
 | ACLINT machine timer | `0x02004000` | 32 KiB | `mtimecmp` and `mtime` |
 | UART | `0x10000000` | 8 bytes | 16550 register window |
+| Mailbox | `0x10010000` | 4 KiB | Firmware event bridge |
+| Management control | `0x10020000` | 4 KiB | Watchdog, reset, telemetry |
 | SRAM | `0x80000000` | 512 KiB | Firmware, data, and stack |
 
 The reset ROM transfers control to the ELF entry point in SRAM. The firmware
@@ -67,6 +70,8 @@ First verify that it applies to the selected clean QEMU source tree:
 make qemu-patch-check QEMU_SRC=/path/to/qemu
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0001-hw-riscv-add-vams-riscv-machine.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0002-hw-add-vams-management-peripherals.patch"
 ```
 
 Configure that tree with the `riscv32-softmmu` target and build
@@ -103,7 +108,8 @@ an idle `wfi` loop after completing bring-up.
 ## Deliberate limitations
 
 - The topology is fixed at one hart and exactly 512 KiB of SRAM.
-- Firmware must be supplied explicitly with `-bios`.
+- ELF firmware must be supplied explicitly with `-bios`; ELF-backed loading
+  restores initialized SRAM contents on management reset.
 - There is no device tree because the freestanding firmware uses a fixed,
   shared platform header.
 - The smoke test uses GNU `timeout` and expects QEMU to remain in the idle loop.

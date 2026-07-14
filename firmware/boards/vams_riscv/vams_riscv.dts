@@ -65,5 +65,18 @@
 			interrupts-extended = <&hlic 11>;
 			status = "okay";
 		};
+
+		mailbox0: mailbox@10010000 {
+			compatible = "vams,mailbox";
+			reg = <0x10010000 0x1000>;
+			interrupts-extended = <&hlic 11>;
+			status = "okay";
+		};
+
+		management0: management@10020000 {
+			compatible = "vams,management";
+			reg = <0x10020000 0x1000>;
+			status = "okay";
+		};
 	};
 };

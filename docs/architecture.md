@@ -48,10 +48,11 @@ The management subsystem initially uses this private physical map:
 | `0x1002_0000–0x1002_0fff` | 4 KiB | watchdog/reset/telemetry bridge |
 | `0x8000_0000–0x8007_ffff` | 512 KiB | firmware SRAM |
 
-Exact peripheral registers become normative in Phase 1–3. The BAR0 contract is
-already normative in the register map. ROM verifies only image structure in
-release 1, initializes trap state, copies/branches to SRAM firmware, and records
-boot reason; secure boot is out of scope.
+The internal peripheral registers are normative in the
+[management-peripheral contract](management-peripherals.md). The BAR0 contract
+is normative in the register map. QEMU restores the ELF-backed SRAM image on a
+management reset before the reset ROM branches to it, while the peripheral
+retains reset-cause telemetry. Secure boot is out of scope.
 
 ## Host stack and queues
 
@@ -117,4 +118,3 @@ RISC-V RTOS firmware with task boundaries, scheduling, watchdog supervision,
 telemetry, and layered recovery. The internal mailbox is only an interrupt/event
 bridge between modeled hardware and firmware. Thus neither a platform MMIO
 device nor a Linux character driver is the architectural center.
-

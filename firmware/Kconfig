@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+
+mainmenu "VAMS management firmware"
+
+source "Kconfig.zephyr"
+
+config VAMS_WATCHDOG_EXPIRY_TEST
+	bool "Deliberately allow the first watchdog deadline to expire"
+	default n
+	help
+	  Exercise watchdog recovery by withholding pets until the first
+	  watchdog-initiated management reset has completed.

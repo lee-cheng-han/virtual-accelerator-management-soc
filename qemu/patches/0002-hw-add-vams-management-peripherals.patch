@@ -1,0 +1,616 @@
+Subject: [PATCH] hw: add VAMS management peripherals
+
+Add the firmware-facing mailbox, watchdog, reset, and telemetry device to the
+VAMS RV32 machine.  Management resets restore ELF-backed SRAM contents while
+retaining reset-cause telemetry, allowing deterministic watchdog recovery.
+
+---
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index 1543ee6653..eab8d30403 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -224,6 +224,9 @@ config SIFIVE_U_PRCI
+ config VIRT_CTRL
+     bool
+
++config VAMS_MGMT
++    bool
++
+ config LASI
+     bool
+     select LASI_82596
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 23265f6035..9b3c6d9ed0 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -26,6 +26,7 @@ system_ss.add(when: 'CONFIG_IOSB', if_true: files('iosb.c'))
+
+ # virt devices
+ system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
++system_ss.add(when: 'CONFIG_VAMS_MGMT', if_true: files('vams_mgmt.c'))
+
+ # RISC-V devices
+ system_ss.add(when: 'CONFIG_MCHP_PFSOC_DMC', if_true: files('mchp_pfsoc_dmc.c'))
+diff --git a/hw/misc/vams_mgmt.c b/hw/misc/vams_mgmt.c
+new file mode 100644
+index 0000000000..6f7bd4a60d
+--- /dev/null
++++ b/hw/misc/vams_mgmt.c
+@@ -0,0 +1,445 @@
++/*
++ * Virtual Accelerator Management SoC management peripherals
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "hw/misc/vams_mgmt.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
++#include "migration/vmstate.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++
++enum {
++    VAMS_MAILBOX_MESSAGE = 0x00,
++    VAMS_MAILBOX_ACK = 0x04,
++    VAMS_MAILBOX_RESPONSE = 0x08,
++    VAMS_MAILBOX_RESPONSE_DOORBELL = 0x0c,
++    VAMS_MAILBOX_STATUS = 0x10,
++};
++
++enum {
++    VAMS_MAILBOX_H2F_PENDING = BIT(0),
++    VAMS_MAILBOX_F2H_PENDING = BIT(1),
++    VAMS_MAILBOX_H2F_OVERFLOW = BIT(2),
++};
++
++enum {
++    VAMS_CONTROL_WDT_TIMEOUT_MS = 0x00,
++    VAMS_CONTROL_WDT_CONTROL = 0x04,
++    VAMS_CONTROL_WDT_PET = 0x08,
++    VAMS_CONTROL_RESET_REQUEST = 0x0c,
++    VAMS_CONTROL_LAST_RESET_REASON = 0x10,
++    VAMS_CONTROL_WDT_RESET_COUNT = 0x14,
++    VAMS_CONTROL_FW_HEARTBEAT = 0x18,
++    VAMS_CONTROL_FW_UPTIME_LO = 0x1c,
++    VAMS_CONTROL_FW_UPTIME_HI = 0x20,
++    VAMS_CONTROL_FW_VERSION = 0x24,
++    VAMS_CONTROL_MAILBOX_RX_COUNT = 0x28,
++    VAMS_CONTROL_MAILBOX_TX_COUNT = 0x2c,
++    VAMS_CONTROL_RESET_GENERATION = 0x30,
++    VAMS_CONTROL_STATUS = 0x34,
++};
++
++enum {
++    VAMS_WDT_ENABLE = BIT(0),
++    VAMS_RESET_REQUEST_MGMT = BIT(0),
++    VAMS_RESET_REASON_POWER_ON = 0,
++    VAMS_RESET_REASON_FIRMWARE = 4,
++    VAMS_RESET_REASON_WATCHDOG = 5,
++    VAMS_CONTROL_BAD_WRITE = BIT(0),
++};
++
++#define VAMS_MMIO_SIZE 0x1000
++#define VAMS_WDT_DEFAULT_TIMEOUT_MS 5000
++#define VAMS_WDT_MIN_TIMEOUT_MS 100
++#define VAMS_WDT_MAX_TIMEOUT_MS 60000
++#define VAMS_WDT_PET_MAGIC 0x56414d53
++
++struct VamsMgmtState {
++    SysBusDevice parent_obj;
++    MemoryRegion mailbox_mmio;
++    MemoryRegion control_mmio;
++    qemu_irq mailbox_irq;
++    qemu_irq reset_out;
++    QEMUTimer *watchdog_timer;
++
++    uint32_t test_message;
++    uint32_t mailbox_message;
++    uint32_t mailbox_response;
++    uint32_t mailbox_status;
++    uint32_t watchdog_timeout_ms;
++    uint32_t watchdog_control;
++    uint32_t last_reset_reason;
++    uint32_t watchdog_reset_count;
++    uint32_t firmware_heartbeat;
++    uint64_t firmware_uptime_ms;
++    uint32_t firmware_version;
++    uint32_t mailbox_rx_count;
++    uint32_t mailbox_tx_count;
++    uint32_t reset_generation;
++    uint32_t control_status;
++    bool warm_reset_pending;
++};
++
++static uint32_t vams_sat_inc(uint32_t value)
++{
++    return value == UINT32_MAX ? value : value + 1;
++}
++
++static void vams_mailbox_update_irq(VamsMgmtState *s)
++{
++    qemu_set_irq(s->mailbox_irq,
++                 (s->mailbox_status & VAMS_MAILBOX_H2F_PENDING) != 0);
++}
++
++static void vams_watchdog_reload(VamsMgmtState *s)
++{
++    int64_t deadline;
++
++    if ((s->watchdog_control & VAMS_WDT_ENABLE) == 0) {
++        timer_del(s->watchdog_timer);
++        return;
++    }
++
++    deadline = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
++               s->watchdog_timeout_ms;
++    timer_mod(s->watchdog_timer, deadline);
++}
++
++static void vams_management_reset(VamsMgmtState *s, uint32_t reason)
++{
++    s->last_reset_reason = reason;
++    s->reset_generation++;
++    s->firmware_heartbeat = 0;
++    s->firmware_uptime_ms = 0;
++    s->firmware_version = 0;
++    s->mailbox_message = 0;
++    s->mailbox_response = 0;
++    s->mailbox_status = 0;
++    vams_mailbox_update_irq(s);
++    vams_watchdog_reload(s);
++    s->warm_reset_pending = true;
++    qemu_irq_pulse(s->reset_out);
++}
++
++static void vams_watchdog_expired(void *opaque)
++{
++    VamsMgmtState *s = opaque;
++
++    s->watchdog_reset_count = vams_sat_inc(s->watchdog_reset_count);
++    vams_management_reset(s, VAMS_RESET_REASON_WATCHDOG);
++}
++
++static uint64_t vams_mailbox_read(void *opaque, hwaddr offset,
++                                  unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++
++    switch (offset) {
++    case VAMS_MAILBOX_MESSAGE:
++        return s->mailbox_message;
++    case VAMS_MAILBOX_RESPONSE:
++        return s->mailbox_response;
++    case VAMS_MAILBOX_STATUS:
++        return s->mailbox_status;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid mailbox read at 0x%" HWADDR_PRIx
++                      "\n", offset);
++        return UINT32_MAX;
++    }
++}
++
++static void vams_mailbox_write(void *opaque, hwaddr offset, uint64_t value,
++                               unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++    uint32_t value32 = value;
++
++    switch (offset) {
++    case VAMS_MAILBOX_ACK:
++        if (value32 != 1 ||
++            (s->mailbox_status & VAMS_MAILBOX_H2F_PENDING) == 0) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        s->mailbox_status &= ~VAMS_MAILBOX_H2F_PENDING;
++        s->mailbox_rx_count = vams_sat_inc(s->mailbox_rx_count);
++        vams_mailbox_update_irq(s);
++        return;
++    case VAMS_MAILBOX_RESPONSE:
++        s->mailbox_response = value32;
++        return;
++    case VAMS_MAILBOX_RESPONSE_DOORBELL:
++        if (value32 != 1 ||
++            (s->mailbox_status & VAMS_MAILBOX_F2H_PENDING) != 0) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        s->mailbox_status |= VAMS_MAILBOX_F2H_PENDING;
++        s->mailbox_tx_count = vams_sat_inc(s->mailbox_tx_count);
++        return;
++    case VAMS_MAILBOX_STATUS:
++        s->mailbox_status &= ~(value32 &
++            (VAMS_MAILBOX_F2H_PENDING | VAMS_MAILBOX_H2F_OVERFLOW));
++        return;
++    default:
++        s->control_status |= VAMS_CONTROL_BAD_WRITE;
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid mailbox write at 0x%"
++                      HWADDR_PRIx "\n", offset);
++    }
++}
++
++static uint64_t vams_control_read(void *opaque, hwaddr offset,
++                                  unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++
++    switch (offset) {
++    case VAMS_CONTROL_WDT_TIMEOUT_MS:
++        return s->watchdog_timeout_ms;
++    case VAMS_CONTROL_WDT_CONTROL:
++        return s->watchdog_control;
++    case VAMS_CONTROL_LAST_RESET_REASON:
++        return s->last_reset_reason;
++    case VAMS_CONTROL_WDT_RESET_COUNT:
++        return s->watchdog_reset_count;
++    case VAMS_CONTROL_FW_HEARTBEAT:
++        return s->firmware_heartbeat;
++    case VAMS_CONTROL_FW_UPTIME_LO:
++        return s->firmware_uptime_ms;
++    case VAMS_CONTROL_FW_UPTIME_HI:
++        return s->firmware_uptime_ms >> 32;
++    case VAMS_CONTROL_FW_VERSION:
++        return s->firmware_version;
++    case VAMS_CONTROL_MAILBOX_RX_COUNT:
++        return s->mailbox_rx_count;
++    case VAMS_CONTROL_MAILBOX_TX_COUNT:
++        return s->mailbox_tx_count;
++    case VAMS_CONTROL_RESET_GENERATION:
++        return s->reset_generation;
++    case VAMS_CONTROL_STATUS:
++        return s->control_status;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid control read at 0x%" HWADDR_PRIx
++                      "\n", offset);
++        return UINT32_MAX;
++    }
++}
++
++static void vams_control_write(void *opaque, hwaddr offset, uint64_t value,
++                               unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++    uint32_t value32 = value;
++
++    switch (offset) {
++    case VAMS_CONTROL_WDT_TIMEOUT_MS:
++        if ((s->watchdog_control & VAMS_WDT_ENABLE) != 0 ||
++            value32 < VAMS_WDT_MIN_TIMEOUT_MS ||
++            value32 > VAMS_WDT_MAX_TIMEOUT_MS) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        s->watchdog_timeout_ms = value32;
++        return;
++    case VAMS_CONTROL_WDT_CONTROL:
++        if ((value32 & ~VAMS_WDT_ENABLE) != 0) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        s->watchdog_control = value32;
++        vams_watchdog_reload(s);
++        return;
++    case VAMS_CONTROL_WDT_PET:
++        if (value32 != VAMS_WDT_PET_MAGIC ||
++            (s->watchdog_control & VAMS_WDT_ENABLE) == 0) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        vams_watchdog_reload(s);
++        return;
++    case VAMS_CONTROL_RESET_REQUEST:
++        if (value32 != VAMS_RESET_REQUEST_MGMT) {
++            s->control_status |= VAMS_CONTROL_BAD_WRITE;
++            return;
++        }
++        vams_management_reset(s, VAMS_RESET_REASON_FIRMWARE);
++        return;
++    case VAMS_CONTROL_FW_HEARTBEAT:
++        s->firmware_heartbeat = value32;
++        return;
++    case VAMS_CONTROL_FW_UPTIME_LO:
++        s->firmware_uptime_ms =
++            (s->firmware_uptime_ms & UINT64_C(0xffffffff00000000)) | value32;
++        return;
++    case VAMS_CONTROL_FW_UPTIME_HI:
++        s->firmware_uptime_ms =
++            ((uint64_t)value32 << 32) | (uint32_t)s->firmware_uptime_ms;
++        return;
++    case VAMS_CONTROL_FW_VERSION:
++        s->firmware_version = value32;
++        return;
++    case VAMS_CONTROL_STATUS:
++        s->control_status &= ~value32;
++        return;
++    default:
++        s->control_status |= VAMS_CONTROL_BAD_WRITE;
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid control write at 0x%"
++                      HWADDR_PRIx "\n", offset);
++    }
++}
++
++static const MemoryRegionOps vams_mailbox_ops = {
++    .read = vams_mailbox_read,
++    .write = vams_mailbox_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++        .unaligned = false,
++    },
++};
++
++static const MemoryRegionOps vams_control_ops = {
++    .read = vams_control_read,
++    .write = vams_control_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++        .unaligned = false,
++    },
++};
++
++static int vams_mgmt_post_load(void *opaque, int version_id)
++{
++    VamsMgmtState *s = opaque;
++
++    vams_mailbox_update_irq(s);
++    return 0;
++}
++
++static const VMStateDescription vams_mgmt_vmstate = {
++    .name = TYPE_VAMS_MGMT,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .post_load = vams_mgmt_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_TIMER_PTR(watchdog_timer, VamsMgmtState),
++        VMSTATE_UINT32(mailbox_message, VamsMgmtState),
++        VMSTATE_UINT32(mailbox_response, VamsMgmtState),
++        VMSTATE_UINT32(mailbox_status, VamsMgmtState),
++        VMSTATE_UINT32(watchdog_timeout_ms, VamsMgmtState),
++        VMSTATE_UINT32(watchdog_control, VamsMgmtState),
++        VMSTATE_UINT32(last_reset_reason, VamsMgmtState),
++        VMSTATE_UINT32(watchdog_reset_count, VamsMgmtState),
++        VMSTATE_UINT32(firmware_heartbeat, VamsMgmtState),
++        VMSTATE_UINT64(firmware_uptime_ms, VamsMgmtState),
++        VMSTATE_UINT32(firmware_version, VamsMgmtState),
++        VMSTATE_UINT32(mailbox_rx_count, VamsMgmtState),
++        VMSTATE_UINT32(mailbox_tx_count, VamsMgmtState),
++        VMSTATE_UINT32(reset_generation, VamsMgmtState),
++        VMSTATE_UINT32(control_status, VamsMgmtState),
++        VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static void vams_mgmt_reset(DeviceState *dev)
++{
++    VamsMgmtState *s = VAMS_MGMT(dev);
++
++    if (s->warm_reset_pending) {
++        s->warm_reset_pending = false;
++        vams_mailbox_update_irq(s);
++        vams_watchdog_reload(s);
++        return;
++    }
++
++    timer_del(s->watchdog_timer);
++    s->mailbox_message = s->test_message;
++    s->mailbox_response = 0;
++    s->mailbox_status = s->test_message != 0 ? VAMS_MAILBOX_H2F_PENDING : 0;
++    s->watchdog_timeout_ms = VAMS_WDT_DEFAULT_TIMEOUT_MS;
++    s->watchdog_control = 0;
++    s->last_reset_reason = VAMS_RESET_REASON_POWER_ON;
++    s->watchdog_reset_count = 0;
++    s->firmware_heartbeat = 0;
++    s->firmware_uptime_ms = 0;
++    s->firmware_version = 0;
++    s->mailbox_rx_count = 0;
++    s->mailbox_tx_count = 0;
++    s->reset_generation = 0;
++    s->control_status = 0;
++    s->warm_reset_pending = false;
++    vams_mailbox_update_irq(s);
++}
++
++static void vams_mgmt_realize(DeviceState *dev, Error **errp)
++{
++    VamsMgmtState *s = VAMS_MGMT(dev);
++
++    s->watchdog_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                     vams_watchdog_expired, s);
++}
++
++static void vams_mgmt_finalize(Object *obj)
++{
++    VamsMgmtState *s = VAMS_MGMT(obj);
++
++    timer_free(s->watchdog_timer);
++}
++
++static const Property vams_mgmt_properties[] = {
++    DEFINE_PROP_UINT32("test-message", VamsMgmtState, test_message, 0),
++};
++
++static void vams_mgmt_init(Object *obj)
++{
++    VamsMgmtState *s = VAMS_MGMT(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->mailbox_mmio, obj, &vams_mailbox_ops, s,
++                          TYPE_VAMS_MGMT ".mailbox", VAMS_MMIO_SIZE);
++    memory_region_init_io(&s->control_mmio, obj, &vams_control_ops, s,
++                          TYPE_VAMS_MGMT ".control", VAMS_MMIO_SIZE);
++    sysbus_init_mmio(sbd, &s->mailbox_mmio);
++    sysbus_init_mmio(sbd, &s->control_mmio);
++    sysbus_init_irq(sbd, &s->mailbox_irq);
++    qdev_init_gpio_out_named(DEVICE(obj), &s->reset_out, "reset", 1);
++}
++
++static void vams_mgmt_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = vams_mgmt_realize;
++    dc->vmsd = &vams_mgmt_vmstate;
++    device_class_set_legacy_reset(dc, vams_mgmt_reset);
++    device_class_set_props(dc, vams_mgmt_properties);
++    dc->desc = "VAMS mailbox, watchdog, reset, and telemetry";
++}
++
++static const TypeInfo vams_mgmt_info = {
++    .name = TYPE_VAMS_MGMT,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(VamsMgmtState),
++    .instance_init = vams_mgmt_init,
++    .instance_finalize = vams_mgmt_finalize,
++    .class_init = vams_mgmt_class_init,
++};
++
++static void vams_mgmt_register_types(void)
++{
++    type_register_static(&vams_mgmt_info);
++}
++
++type_init(vams_mgmt_register_types)
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+index 4db0957013..aea7d37492 100644
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -139,6 +139,7 @@ config VAMS_RISCV
+     depends on RISCV32
+     select RISCV_ACLINT
+     select SERIAL_MM
++    select VAMS_MGMT
+
+ config XIANGSHAN_KUNMINGHU
+     bool
+diff --git a/hw/riscv/vams_riscv.c b/hw/riscv/vams_riscv.c
+index d8febe3617..1ce302d452 100644
+--- a/hw/riscv/vams_riscv.c
++++ b/hw/riscv/vams_riscv.c
+@@ -10,10 +10,15 @@
+ #include "qemu/error-report.h"
+ #include "hw/char/serial-mm.h"
+ #include "hw/core/boards.h"
++#include "hw/core/irq.h"
++#include "hw/core/loader.h"
+ #include "hw/intc/riscv_aclint.h"
++#include "hw/misc/vams_mgmt.h"
+ #include "hw/riscv/boot.h"
+ #include "hw/riscv/machines-qom.h"
+ #include "hw/riscv/riscv_hart.h"
++#include "elf.h"
++#include "system/runstate.h"
+ #include "system/system.h"
+ #include "target/riscv/cpu-qom.h"
+
+@@ -26,6 +31,8 @@ enum {
+     VAMS_ACLINT_SWI_BASE = 0x02000000,
+     VAMS_ACLINT_MTIMER_BASE = 0x02004000,
+     VAMS_UART_BASE = 0x10000000,
++    VAMS_MAILBOX_BASE = 0x10010000,
++    VAMS_CONTROL_BASE = 0x10020000,
+     VAMS_SRAM_BASE = 0x80000000,
+     VAMS_SRAM_SIZE = 0x00080000,
+ };
+@@ -36,13 +43,37 @@ struct VamsRiscvMachineState {
+     MemoryRegion rom;
+ };
+
++static void vams_riscv_reset_irq(void *opaque, int n, int level)
++{
++    if (level) {
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++    }
++}
++
++static hwaddr vams_riscv_load_firmware(const char *filename)
++{
++    uint64_t entry;
++    ssize_t size;
++
++    size = load_elf(filename, NULL, NULL, NULL, &entry, NULL, NULL, NULL,
++                    ELFDATA2LSB, EM_RISCV, 1, 0);
++    if (size < 0) {
++        error_report("could not load ELF firmware '%s': %s", filename,
++                     load_elf_strerror(size));
++        exit(EXIT_FAILURE);
++    }
++
++    return entry;
++}
++
+ static void vams_riscv_machine_init(MachineState *machine)
+ {
+     MachineClass *mc = MACHINE_GET_CLASS(machine);
+     VamsRiscvMachineState *s = VAMS_RISCV_MACHINE(machine);
+     MemoryRegion *system_memory = get_system_memory();
++    DeviceState *mgmt;
+     RISCVBootInfo boot_info;
+-    hwaddr firmware_load_addr = VAMS_SRAM_BASE;
++    hwaddr firmware_load_addr;
+
+     if (machine->ram_size != mc->default_ram_size) {
+         g_autofree char *size = size_to_str(mc->default_ram_size);
+@@ -61,7 +92,6 @@ static void vams_riscv_machine_init(MachineState *machine)
+     object_property_set_int(OBJECT(&s->cpus), "resetvec", VAMS_ROM_BASE,
+                             &error_abort);
+     sysbus_realize(SYS_BUS_DEVICE(&s->cpus), &error_fatal);
+-
+     memory_region_add_subregion(system_memory, VAMS_SRAM_BASE, machine->ram);
+     memory_region_init_rom(&s->rom, NULL, "vams.riscv.rom",
+                            VAMS_ROM_SIZE, &error_fatal);
+@@ -78,9 +108,18 @@ static void vams_riscv_machine_init(MachineState *machine)
+                    qdev_get_gpio_in(DEVICE(&s->cpus.harts[0]), IRQ_M_EXT),
+                    399193, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+
++    mgmt = qdev_new(TYPE_VAMS_MGMT);
++
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(mgmt), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(mgmt), 0, VAMS_MAILBOX_BASE);
++    sysbus_mmio_map(SYS_BUS_DEVICE(mgmt), 1, VAMS_CONTROL_BASE);
++    sysbus_connect_irq(SYS_BUS_DEVICE(mgmt), 0,
++                       qdev_get_gpio_in(DEVICE(&s->cpus.harts[0]), IRQ_M_EXT));
++    qdev_connect_gpio_out_named(mgmt, "reset", 0,
++        qemu_allocate_irq(vams_riscv_reset_irq, NULL, 0));
++
+     riscv_boot_info_init(&boot_info, &s->cpus);
+-    riscv_load_firmware(machine, &boot_info, machine->firmware,
+-                        &firmware_load_addr, NULL);
++    firmware_load_addr = vams_riscv_load_firmware(machine->firmware);
+     riscv_setup_rom_reset_vec(machine, &s->cpus, firmware_load_addr,
+                               VAMS_ROM_BASE, VAMS_ROM_SIZE, 0, 0);
+ }
+diff --git a/include/hw/misc/vams_mgmt.h b/include/hw/misc/vams_mgmt.h
+new file mode 100644
+index 0000000000..9652e1191b
+--- /dev/null
++++ b/include/hw/misc/vams_mgmt.h
+@@ -0,0 +1,16 @@
++/*
++ * Virtual Accelerator Management SoC management peripherals
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_MISC_VAMS_MGMT_H
++#define HW_MISC_VAMS_MGMT_H
++
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_VAMS_MGMT "vams-mgmt"
++OBJECT_DECLARE_SIMPLE_TYPE(VamsMgmtState, VAMS_MGMT)
++
++#endif

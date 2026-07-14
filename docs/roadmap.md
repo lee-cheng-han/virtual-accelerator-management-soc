@@ -19,9 +19,10 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 | **9 — Stress/performance** | Model/property queue tests, ring wrap, million-command and long-duration runs, repeated reset, histogram, throughput, stack/SRAM use, watchdog margin and queue high-water report. |
 | **10 — CI/demo** | Pinned reproducible builds, compatibility matrix, coverage/static analysis/fuzzing and layered tests in CI; unified trace export; `make demo` boots, submits, verifies, faults, recovers, and reports PASS/FAIL. |
 
-Current gate: the Zephyr port is implemented and accepted by the strict-warning
-RTOS build and automated timer/IPC smoke test. Management peripherals are the
-next implementation gate.
+Current gate: the management peripherals are implemented and accepted by the
+strict-warning RTOS builds, QTest register checks, mailbox/telemetry smoke, and
+forced-watchdog-reset recovery smoke. The PCIe endpoint is the next
+implementation gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a

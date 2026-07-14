@@ -1,0 +1,12 @@
+description: VAMS host-to-firmware mailbox
+
+compatible: "vams,mailbox"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true
+
+  interrupts-extended:
+    required: true

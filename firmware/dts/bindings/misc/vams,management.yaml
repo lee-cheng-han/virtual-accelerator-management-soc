@@ -1,0 +1,9 @@
+description: VAMS watchdog, reset, and telemetry registers
+
+compatible: "vams,management"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true

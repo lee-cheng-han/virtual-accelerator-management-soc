@@ -20,7 +20,7 @@ documentation checks only. Planned tests are not reported as passing.
 | Requirement group | Minimum gate evidence |
 |---|---|
 | SYS-01/02 | boot console golden output plus timer/interrupt/reset QTests |
-| SYS-03 | Zephyr boot and two-task synchronization test |
+| SYS-03 | Zephyr boot, task synchronization, mailbox/telemetry, and watchdog-reset tests |
 | PCI-01 | config-space/BAR QTest and guest `lspci`/probe log |
 | ABI-01/02 | descriptor byte-layout compile test, table-driven validation, ring model/property tests |
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
@@ -64,15 +64,15 @@ dependencies enter the project. Fast unit/QTest jobs run on each change; the VM
 integration job may be separate but remains required for release. Random stress
 always logs and accepts a seed so a failure is reproducible.
 
-## Phase 0 validation
+## Current validation
 
 ```sh
 make check
 git diff --check
 ```
 
-`make check` verifies required documents, descriptor assertions as text, status
-label, and whitespace. Manual review verifies cross-document constants and that
-no Phase 1 code is present. Later phases must replace textual layout checks with
-compiled static assertions and raw-byte tests.
-
+`make check` verifies required documents, descriptor assertions as text, the
+status label, and whitespace. The executable management subsystem additionally
+uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`, and
+`watchdog-smoke`. Descriptor layout checks remain textual until the generated
+command ABI and compiled raw-byte tests are introduced with the host path.
