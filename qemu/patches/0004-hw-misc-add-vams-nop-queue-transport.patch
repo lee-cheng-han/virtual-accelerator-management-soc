@@ -1,0 +1,657 @@
+Subject: [PATCH] hw/misc: add VAMS NOP queue transport
+
+Add one host-memory submission and completion queue, synchronous PCI DMA
+ordering, v1 NOP validation, completion publication, queue reset, and CQ
+interrupt behavior.  Advertise DMA and polling-safe CQ only with the complete
+transport present, and share the generated descriptor definitions.
+
+---
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/misc/vams_abi.h"
+ #include "hw/misc/vams_pcie.h"
+ #include "hw/pci/msix.h"
+ #include "hw/pci/pcie.h"
+@@ -37,6 +38,22 @@
+     VAMS_REG_ERROR_STATUS = 0x024,
+     VAMS_REG_RESET_GENERATION = 0x028,
+     VAMS_REG_LAST_FATAL = 0x02c,
++    VAMS_REG_SQ_BASE_LO = 0x100,
++    VAMS_REG_SQ_BASE_HI = 0x104,
++    VAMS_REG_SQ_DEPTH = 0x108,
++    VAMS_REG_SQ_HEAD = 0x10c,
++    VAMS_REG_SQ_TAIL = 0x110,
++    VAMS_REG_SQ_DOORBELL = 0x114,
++    VAMS_REG_SQ_CONTROL = 0x118,
++    VAMS_REG_SQ_STATUS = 0x11c,
++    VAMS_REG_CQ_BASE_LO = 0x200,
++    VAMS_REG_CQ_BASE_HI = 0x204,
++    VAMS_REG_CQ_DEPTH = 0x208,
++    VAMS_REG_CQ_HEAD = 0x20c,
++    VAMS_REG_CQ_TAIL = 0x210,
++    VAMS_REG_CQ_DOORBELL = 0x214,
++    VAMS_REG_CQ_CONTROL = 0x218,
++    VAMS_REG_CQ_STATUS = 0x21c,
+     VAMS_REG_INTR_STATUS = 0x300,
+     VAMS_REG_INTR_MASK = 0x304,
+     VAMS_REG_INTR_FORCE = 0x308,
+@@ -44,8 +61,11 @@
+ };
+ 
+ enum {
++    VAMS_CAP_DMA = BIT(0),
+     VAMS_CAP_MSIX = BIT(1),
++    VAMS_CAP_POLLING_CQ = BIT(5),
+     VAMS_STATUS_READY = BIT(0),
++    VAMS_STATUS_QUEUES_READY = BIT(2),
+     VAMS_STATUS_RESETTING = BIT(4),
+     VAMS_CONTROL_ENABLE = BIT(0),
+     VAMS_CONTROL_RESET = BIT(1),
+@@ -54,17 +74,27 @@
+     VAMS_ERROR_RESERVED_WRITE = BIT(1),
+     VAMS_ERROR_RO_WRITE = BIT(2),
+     VAMS_ERROR_BAD_CONFIG = BIT(3),
++    VAMS_ERROR_DMA = BIT(4),
++    VAMS_ERROR_QUEUE = BIT(5),
+     VAMS_ERROR_FATAL = BIT(9),
+     VAMS_INTR_CQ = BIT(0),
+     VAMS_INTR_ERROR = BIT(1),
+     VAMS_INTR_FW_EVENT = BIT(2),
+     VAMS_INTR_RESET_DONE = BIT(3),
++    VAMS_QUEUE_ENABLE = BIT(0),
++    VAMS_QUEUE_RESET = BIT(1),
++    VAMS_QUEUE_STATUS_ENABLED = BIT(0),
++    VAMS_QUEUE_STATUS_EMPTY = BIT(1),
++    VAMS_QUEUE_STATUS_FULL = BIT(2),
+ };
+ 
+ #define VAMS_CONTROL_DEFINED \
+     (VAMS_CONTROL_ENABLE | VAMS_CONTROL_RESET | VAMS_CONTROL_QUIESCE)
+ #define VAMS_ERROR_DEFINED 0x000003ff
+ #define VAMS_INTR_DEFINED 0x0000000f
++#define VAMS_QUEUE_CONTROL_DEFINED (VAMS_QUEUE_ENABLE | VAMS_QUEUE_RESET)
++#define VAMS_QUEUE_MIN_DEPTH 16
++#define VAMS_QUEUE_MAX_DEPTH 1024
+ 
+ struct VamsPcieState {
+     PCIDevice parent_obj;
+@@ -79,6 +109,20 @@
+     uint32_t intr_status;
+     uint32_t intr_mask;
+     uint32_t intr_coalesce;
++    uint64_t sq_base;
++    uint32_t sq_base_lo;
++    uint32_t sq_depth;
++    uint32_t sq_head;
++    uint32_t sq_tail;
++    uint32_t sq_control;
++    bool sq_error;
++    uint64_t cq_base;
++    uint32_t cq_base_lo;
++    uint32_t cq_depth;
++    uint32_t cq_head;
++    uint32_t cq_tail;
++    uint32_t cq_control;
++    bool cq_error;
+ };
+ 
+ static void vams_pcie_notify(VamsPcieState *s, uint32_t pending)
+@@ -109,6 +153,164 @@
+     vams_pcie_raise_interrupt(s, VAMS_INTR_ERROR);
+ }
+ 
++static bool vams_pcie_valid_depth(uint32_t depth)
++{
++    return depth >= VAMS_QUEUE_MIN_DEPTH && depth <= VAMS_QUEUE_MAX_DEPTH &&
++           is_power_of_2(depth);
++}
++
++static bool vams_pcie_cq_full(const VamsPcieState *s)
++{
++    return s->cq_depth && ((s->cq_tail + 1) & (s->cq_depth - 1)) == s->cq_head;
++}
++
++static uint32_t vams_pcie_sq_status(const VamsPcieState *s)
++{
++    uint32_t status = 0;
++
++    if (s->sq_control & VAMS_QUEUE_ENABLE) {
++        status |= VAMS_QUEUE_STATUS_ENABLED;
++        if (s->sq_head == s->sq_tail) {
++            status |= VAMS_QUEUE_STATUS_EMPTY;
++        }
++        if (((s->sq_tail + 1) & (s->sq_depth - 1)) == s->sq_head) {
++            status |= VAMS_QUEUE_STATUS_FULL;
++        }
++    }
++    if (s->sq_error) {
++        status |= BIT(4);
++    }
++    return status;
++}
++
++static uint32_t vams_pcie_cq_status(const VamsPcieState *s)
++{
++    uint32_t status = 0;
++
++    if (s->cq_control & VAMS_QUEUE_ENABLE) {
++        status |= VAMS_QUEUE_STATUS_ENABLED;
++        if (s->cq_head == s->cq_tail) {
++            status |= VAMS_QUEUE_STATUS_EMPTY;
++        }
++        if (vams_pcie_cq_full(s)) {
++            status |= VAMS_QUEUE_STATUS_FULL;
++        }
++    }
++    if (s->cq_error) {
++        status |= BIT(4);
++    }
++    return status;
++}
++
++static void vams_pcie_update_queue_ready(VamsPcieState *s)
++{
++    if ((s->sq_control & VAMS_QUEUE_ENABLE) &&
++        (s->cq_control & VAMS_QUEUE_ENABLE)) {
++        s->device_status |= VAMS_STATUS_QUEUES_READY;
++    } else {
++        s->device_status &= ~VAMS_STATUS_QUEUES_READY;
++        s->device_control &= ~VAMS_CONTROL_ENABLE;
++    }
++}
++
++static void vams_pcie_queue_reset(VamsPcieState *s)
++{
++    s->device_control &= ~VAMS_CONTROL_ENABLE;
++    s->device_status &= ~VAMS_STATUS_QUEUES_READY;
++    s->sq_head = 0;
++    s->sq_tail = 0;
++    s->sq_control = 0;
++    s->sq_error = false;
++    s->cq_head = 0;
++    s->cq_tail = 0;
++    s->cq_control = 0;
++    s->cq_error = false;
++    s->intr_status &= ~VAMS_INTR_CQ;
++    msix_clr_pending(PCI_DEVICE(s), 0);
++    s->reset_generation++;
++}
++
++static uint16_t vams_pcie_validate_nop(const struct vams_submission *submission)
++{
++    uint32_t timeout_ms;
++
++    if (le16_to_cpu(submission->version) != VAMS_DESC_VERSION_1) {
++        return VAMS_ERR_UNSUPPORTED_VERSION;
++    }
++    if (submission->opcode != VAMS_OP_NOP) {
++        return VAMS_ERR_INVALID_OPCODE;
++    }
++    if (submission->flags) {
++        return VAMS_ERR_INVALID_FLAGS;
++    }
++    if (le32_to_cpu(submission->expected_crc) ||
++        le32_to_cpu(submission->reserved0) ||
++        le64_to_cpu(submission->reserved1) ||
++        le64_to_cpu(submission->reserved2)) {
++        return VAMS_ERR_RESERVED_NONZERO;
++    }
++    timeout_ms = le32_to_cpu(submission->timeout_ms);
++    if (timeout_ms > 60000) {
++        return VAMS_ERR_INVALID_TIMEOUT;
++    }
++    if (le32_to_cpu(submission->length)) {
++        return VAMS_ERR_INVALID_LENGTH;
++    }
++    if (le64_to_cpu(submission->source_dma) ||
++        le64_to_cpu(submission->destination_dma)) {
++        return VAMS_ERR_INVALID_ADDRESS;
++    }
++    return VAMS_ERR_NONE;
++}
++
++static void vams_pcie_process_sq(VamsPcieState *s)
++{
++    PCIDevice *pdev = PCI_DEVICE(s);
++
++    if (!(s->device_control & VAMS_CONTROL_ENABLE) ||
++        (s->device_control & VAMS_CONTROL_QUIESCE) ||
++        !(pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MASTER)) {
++        return;
++    }
++
++    while (s->sq_head != s->sq_tail && !vams_pcie_cq_full(s)) {
++        struct vams_submission submission;
++        struct vams_completion completion = { 0 };
++        uint16_t error_code;
++        dma_addr_t address;
++        MemTxResult result;
++
++        address = s->sq_base + (uint64_t)s->sq_head * VAMS_SUBMISSION_SIZE;
++        result = pci_dma_read(pdev, address, &submission, sizeof(submission));
++        if (result != MEMTX_OK) {
++            s->sq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_DMA | VAMS_ERROR_QUEUE);
++            return;
++        }
++        s->sq_head = (s->sq_head + 1) & (s->sq_depth - 1);
++
++        error_code = vams_pcie_validate_nop(&submission);
++        completion.command_id = submission.command_id;
++        completion.status = cpu_to_le16(error_code == VAMS_ERR_NONE ?
++                                        VAMS_STATUS_SUCCESS :
++                                        VAMS_STATUS_INVALID);
++        completion.error_code = cpu_to_le16(error_code);
++        completion.user_cookie = submission.user_cookie;
++        completion.device_timestamp = cpu_to_le64(
++            qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
++
++        address = s->cq_base + (uint64_t)s->cq_tail * VAMS_COMPLETION_SIZE;
++        result = pci_dma_write(pdev, address, &completion, sizeof(completion));
++        if (result != MEMTX_OK) {
++            s->cq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_DMA | VAMS_ERROR_QUEUE);
++            return;
++        }
++        s->cq_tail = (s->cq_tail + 1) & (s->cq_depth - 1);
++        vams_pcie_raise_interrupt(s, VAMS_INTR_CQ);
++    }
++}
++
+ static void vams_pcie_reset_complete(void *opaque)
+ {
+     VamsPcieState *s = opaque;
+@@ -133,6 +335,20 @@
+     s->intr_status = 0;
+     s->intr_mask = VAMS_INTR_DEFINED;
+     s->intr_coalesce = 1;
++    s->sq_base = 0;
++    s->sq_base_lo = 0;
++    s->sq_depth = 0;
++    s->sq_head = 0;
++    s->sq_tail = 0;
++    s->sq_control = 0;
++    s->sq_error = false;
++    s->cq_base = 0;
++    s->cq_base_lo = 0;
++    s->cq_depth = 0;
++    s->cq_head = 0;
++    s->cq_tail = 0;
++    s->cq_control = 0;
++    s->cq_error = false;
+     for (vector = 0; vector < VAMS_MSIX_VECTORS; vector++) {
+         msix_clr_pending(PCI_DEVICE(s), vector);
+     }
+@@ -161,7 +377,7 @@
+     case VAMS_REG_DESC_VERSION:
+         return 1;
+     case VAMS_REG_CAPABILITIES:
+-        return VAMS_CAP_MSIX;
++        return VAMS_CAP_DMA | VAMS_CAP_MSIX | VAMS_CAP_POLLING_CQ;
+     case VAMS_REG_MAX_TRANSFER:
+         return 0x01000000;
+     case VAMS_REG_QUEUE_LIMITS:
+@@ -176,6 +392,38 @@
+         return s->reset_generation;
+     case VAMS_REG_LAST_FATAL:
+         return s->last_fatal;
++    case VAMS_REG_SQ_BASE_LO:
++        return s->sq_base_lo;
++    case VAMS_REG_SQ_BASE_HI:
++        return s->sq_base >> 32;
++    case VAMS_REG_SQ_DEPTH:
++        return s->sq_depth;
++    case VAMS_REG_SQ_HEAD:
++        return s->sq_head;
++    case VAMS_REG_SQ_TAIL:
++        return s->sq_tail;
++    case VAMS_REG_SQ_DOORBELL:
++        return 0;
++    case VAMS_REG_SQ_CONTROL:
++        return s->sq_control;
++    case VAMS_REG_SQ_STATUS:
++        return vams_pcie_sq_status(s);
++    case VAMS_REG_CQ_BASE_LO:
++        return s->cq_base_lo;
++    case VAMS_REG_CQ_BASE_HI:
++        return s->cq_base >> 32;
++    case VAMS_REG_CQ_DEPTH:
++        return s->cq_depth;
++    case VAMS_REG_CQ_HEAD:
++        return s->cq_head;
++    case VAMS_REG_CQ_TAIL:
++        return s->cq_tail;
++    case VAMS_REG_CQ_DOORBELL:
++        return 0;
++    case VAMS_REG_CQ_CONTROL:
++        return s->cq_control;
++    case VAMS_REG_CQ_STATUS:
++        return vams_pcie_cq_status(s);
+     case VAMS_REG_INTR_STATUS:
+         return s->intr_status;
+     case VAMS_REG_INTR_MASK:
+@@ -210,6 +458,12 @@
+         return;
+     }
+ 
++    if (offset >= VAMS_REG_SQ_BASE_LO && offset <= VAMS_REG_CQ_STATUS &&
++        (s->device_status & VAMS_STATUS_RESETTING)) {
++        vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++        return;
++    }
++
+     switch (offset) {
+     case VAMS_REG_DEVICE_ID:
+     case VAMS_REG_HW_IF_VERSION:
+@@ -221,6 +475,12 @@
+     case VAMS_REG_DEVICE_STATUS:
+     case VAMS_REG_RESET_GENERATION:
+     case VAMS_REG_LAST_FATAL:
++    case VAMS_REG_SQ_HEAD:
++    case VAMS_REG_SQ_TAIL:
++    case VAMS_REG_SQ_STATUS:
++    case VAMS_REG_CQ_HEAD:
++    case VAMS_REG_CQ_TAIL:
++    case VAMS_REG_CQ_STATUS:
+         vams_pcie_write_ro(s);
+         return;
+     case VAMS_REG_DEVICE_CONTROL:
+@@ -233,10 +493,146 @@
+             return;
+         }
+         if (value32 & VAMS_CONTROL_ENABLE) {
+-            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            if (!(s->sq_control & VAMS_QUEUE_ENABLE) ||
++                !(s->cq_control & VAMS_QUEUE_ENABLE) ||
++                !(pci_get_word(PCI_DEVICE(s)->config + PCI_COMMAND) &
++                  PCI_COMMAND_MASTER)) {
++                vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++                return;
++            }
++            s->device_control = VAMS_CONTROL_ENABLE |
++                                (value32 & VAMS_CONTROL_QUIESCE);
++            vams_pcie_process_sq(s);
++            return;
+         }
+         s->device_control = value32 & VAMS_CONTROL_QUIESCE;
+         return;
++    case VAMS_REG_SQ_BASE_LO:
++        if (s->sq_control & VAMS_QUEUE_ENABLE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->sq_base_lo = value32;
++        return;
++    case VAMS_REG_SQ_BASE_HI: {
++        uint64_t base = ((uint64_t)value32 << 32) | s->sq_base_lo;
++
++        if ((s->sq_control & VAMS_QUEUE_ENABLE) || (base & 63)) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->sq_base = base;
++        return;
++    }
++    case VAMS_REG_SQ_DEPTH:
++        if ((s->sq_control & VAMS_QUEUE_ENABLE) ||
++            (value32 && !vams_pcie_valid_depth(value32))) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->sq_depth = value32;
++        return;
++    case VAMS_REG_SQ_DOORBELL: {
++        uint32_t advance;
++        uint32_t available;
++
++        if (!(s->sq_control & VAMS_QUEUE_ENABLE) ||
++            value32 >= s->sq_depth) {
++            s->sq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_QUEUE);
++            return;
++        }
++        advance = (value32 - s->sq_tail) & (s->sq_depth - 1);
++        available = (s->sq_head - s->sq_tail - 1) & (s->sq_depth - 1);
++        if (advance > available) {
++            s->sq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_QUEUE);
++            return;
++        }
++        s->sq_tail = value32;
++        vams_pcie_process_sq(s);
++        return;
++    }
++    case VAMS_REG_SQ_CONTROL:
++        reserved = value32 & ~VAMS_QUEUE_CONTROL_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        if (value32 & VAMS_QUEUE_RESET) {
++            vams_pcie_queue_reset(s);
++            return;
++        }
++        if ((value32 & VAMS_QUEUE_ENABLE) &&
++            (!s->sq_base || !vams_pcie_valid_depth(s->sq_depth))) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->sq_control = value32 & VAMS_QUEUE_ENABLE;
++        vams_pcie_update_queue_ready(s);
++        return;
++    case VAMS_REG_CQ_BASE_LO:
++        if (s->cq_control & VAMS_QUEUE_ENABLE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->cq_base_lo = value32;
++        return;
++    case VAMS_REG_CQ_BASE_HI: {
++        uint64_t base = ((uint64_t)value32 << 32) | s->cq_base_lo;
++
++        if ((s->cq_control & VAMS_QUEUE_ENABLE) || (base & 63)) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->cq_base = base;
++        return;
++    }
++    case VAMS_REG_CQ_DEPTH:
++        if ((s->cq_control & VAMS_QUEUE_ENABLE) ||
++            (value32 && !vams_pcie_valid_depth(value32))) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->cq_depth = value32;
++        return;
++    case VAMS_REG_CQ_DOORBELL: {
++        uint32_t advance;
++        uint32_t produced;
++
++        if (!(s->cq_control & VAMS_QUEUE_ENABLE) ||
++            value32 >= s->cq_depth) {
++            s->cq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_QUEUE);
++            return;
++        }
++        advance = (value32 - s->cq_head) & (s->cq_depth - 1);
++        produced = (s->cq_tail - s->cq_head) & (s->cq_depth - 1);
++        if (advance > produced) {
++            s->cq_error = true;
++            vams_pcie_set_error(s, VAMS_ERROR_QUEUE);
++            return;
++        }
++        s->cq_head = value32;
++        vams_pcie_process_sq(s);
++        return;
++    }
++    case VAMS_REG_CQ_CONTROL:
++        reserved = value32 & ~VAMS_QUEUE_CONTROL_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        if (value32 & VAMS_QUEUE_RESET) {
++            vams_pcie_queue_reset(s);
++            return;
++        }
++        if ((value32 & VAMS_QUEUE_ENABLE) &&
++            (!s->cq_base || !vams_pcie_valid_depth(s->cq_depth))) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->cq_control = value32 & VAMS_QUEUE_ENABLE;
++        vams_pcie_update_queue_ready(s);
++        return;
+     case VAMS_REG_ERROR_STATUS:
+         reserved = value32 & ~VAMS_ERROR_DEFINED;
+         s->error_status &= ~(value32 & VAMS_ERROR_DEFINED);
+@@ -250,6 +646,9 @@
+         if (reserved) {
+             vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
+         }
++        if ((value32 & VAMS_INTR_CQ) && s->cq_head != s->cq_tail) {
++            vams_pcie_raise_interrupt(s, VAMS_INTR_CQ);
++        }
+         return;
+     case VAMS_REG_INTR_MASK: {
+         uint32_t old_mask = s->intr_mask;
+@@ -302,8 +701,8 @@
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 1,
+-    .minimum_version_id = 1,
++    .version_id = 2,
++    .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+         VMSTATE_MSIX(parent_obj, VamsPcieState),
+@@ -316,6 +715,20 @@
+         VMSTATE_UINT32(intr_status, VamsPcieState),
+         VMSTATE_UINT32(intr_mask, VamsPcieState),
+         VMSTATE_UINT32(intr_coalesce, VamsPcieState),
++        VMSTATE_UINT64(sq_base, VamsPcieState),
++        VMSTATE_UINT32(sq_base_lo, VamsPcieState),
++        VMSTATE_UINT32(sq_depth, VamsPcieState),
++        VMSTATE_UINT32(sq_head, VamsPcieState),
++        VMSTATE_UINT32(sq_tail, VamsPcieState),
++        VMSTATE_UINT32(sq_control, VamsPcieState),
++        VMSTATE_BOOL(sq_error, VamsPcieState),
++        VMSTATE_UINT64(cq_base, VamsPcieState),
++        VMSTATE_UINT32(cq_base_lo, VamsPcieState),
++        VMSTATE_UINT32(cq_depth, VamsPcieState),
++        VMSTATE_UINT32(cq_head, VamsPcieState),
++        VMSTATE_UINT32(cq_tail, VamsPcieState),
++        VMSTATE_UINT32(cq_control, VamsPcieState),
++        VMSTATE_BOOL(cq_error, VamsPcieState),
+         VMSTATE_END_OF_LIST()
+     },
+ };
+@@ -333,6 +746,20 @@
+     s->intr_status = 0;
+     s->intr_mask = VAMS_INTR_DEFINED;
+     s->intr_coalesce = 1;
++    s->sq_base = 0;
++    s->sq_base_lo = 0;
++    s->sq_depth = 0;
++    s->sq_head = 0;
++    s->sq_tail = 0;
++    s->sq_control = 0;
++    s->sq_error = false;
++    s->cq_base = 0;
++    s->cq_base_lo = 0;
++    s->cq_depth = 0;
++    s->cq_head = 0;
++    s->cq_tail = 0;
++    s->cq_control = 0;
++    s->cq_error = false;
+ }
+ 
+ static void vams_pcie_realize(PCIDevice *pdev, Error **errp)
+@@ -341,6 +768,9 @@
+     int ret;
+     int vector;
+ 
++    QEMU_BUILD_BUG_ON(sizeof(struct vams_submission) != VAMS_SUBMISSION_SIZE);
++    QEMU_BUILD_BUG_ON(sizeof(struct vams_completion) != VAMS_COMPLETION_SIZE);
++
+     memory_region_init_io(&s->bar0, OBJECT(s), &vams_pcie_bar0_ops, s,
+                           TYPE_VAMS_PCIE ".bar0", VAMS_BAR0_SIZE);
+     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
+--- /dev/null
++++ b/include/hw/misc/vams_abi.h
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/* Generated by scripts/gen-vams-abi.py; do not edit. */
++#ifndef HW_MISC_VAMS_ABI_H
++#define HW_MISC_VAMS_ABI_H
++
++#include "qemu/compiler.h"
++#include "qemu/typedefs.h"
++
++#define VAMS_DESC_VERSION_1 1U
++#define VAMS_OP_NOP 0x0000U
++#define VAMS_OP_MEM_COPY 0x0001U
++#define VAMS_OP_MEM_FILL 0x0002U
++#define VAMS_OP_CRC32 0x0003U
++#define VAMS_OP_VECTOR_ADD 0x0004U
++#define VAMS_STATUS_SUCCESS 0x0000U
++#define VAMS_STATUS_INVALID 0x0001U
++#define VAMS_STATUS_FAILED 0x0002U
++#define VAMS_STATUS_TIMED_OUT 0x0003U
++#define VAMS_STATUS_CANCELLED 0x0004U
++#define VAMS_STATUS_RESET 0x0005U
++#define VAMS_ERR_NONE 0x0000U
++#define VAMS_ERR_UNSUPPORTED_VERSION 0x0001U
++#define VAMS_ERR_INVALID_OPCODE 0x0002U
++#define VAMS_ERR_INVALID_FLAGS 0x0003U
++#define VAMS_ERR_RESERVED_NONZERO 0x0004U
++#define VAMS_ERR_DUPLICATE_ID 0x0005U
++#define VAMS_ERR_INVALID_LENGTH 0x0006U
++#define VAMS_ERR_INVALID_ALIGNMENT 0x0007U
++#define VAMS_ERR_ADDRESS_OVERFLOW 0x0008U
++#define VAMS_ERR_INVALID_ADDRESS 0x0009U
++#define VAMS_ERR_INVALID_TIMEOUT 0x000aU
++#define VAMS_ERR_DMA_READ 0x0010U
++#define VAMS_ERR_DMA_WRITE 0x0011U
++#define VAMS_ERR_ENGINE 0x0012U
++#define VAMS_ERR_TIMEOUT 0x0013U
++#define VAMS_ERR_CRC_MISMATCH 0x0014U
++#define VAMS_ERR_RESET 0x0015U
++#define VAMS_ERR_QUEUE_RESET 0x0016U
++#define VAMS_ERR_DEVICE_FATAL 0x0017U
++
++struct QEMU_PACKED vams_submission {
++    uint16_t version;
++    uint8_t opcode;
++    uint8_t flags;
++    uint32_t command_id;
++    uint64_t source_dma;
++    uint64_t destination_dma;
++    uint32_t length;
++    uint32_t timeout_ms;
++    uint64_t user_cookie;
++    uint32_t expected_crc;
++    uint32_t reserved0;
++    uint64_t reserved1;
++    uint64_t reserved2;
++};
++
++struct QEMU_PACKED vams_completion {
++    uint32_t command_id;
++    uint16_t status;
++    uint16_t error_code;
++    uint32_t bytes_processed;
++    uint32_t result_crc;
++    uint64_t user_cookie;
++    uint64_t device_timestamp;
++};
++
++#define VAMS_SUBMISSION_SIZE 64U
++#define VAMS_COMPLETION_SIZE 32U
++
++#endif /* HW_MISC_VAMS_ABI_H */
+

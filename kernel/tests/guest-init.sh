@@ -14,9 +14,9 @@ finish()
 {
 	code="$1"
 	if [ "$code" -eq 0 ]; then
-		echo 'VAMS Linux PCI probe, MSI-X, and cleanup smoke test: PASS'
+		echo 'VAMS Linux PCI queue, NOP, MSI-X, and cleanup smoke test: PASS'
 	else
-		echo 'VAMS Linux PCI probe, MSI-X, or cleanup smoke test: FAIL'
+		echo 'VAMS Linux PCI queue, NOP, MSI-X, or cleanup smoke test: FAIL'
 	fi
 	sync
 	devmem 0xf4 32 "$code"
@@ -43,7 +43,7 @@ done
 echo "VAMS test device: ${vams_device##*/}"
 
 step=1
-while [ "$step" -le 7 ]; do
+while [ "$step" -le 8 ]; do
 	insmod /vams_pci.ko probe_fail_step="$step" ||
 		fail "module registration failed at injected step $step"
 	[ ! -L "$vams_device/driver" ] ||
@@ -52,8 +52,8 @@ while [ "$step" -le 7 ]; do
 	step=$((step + 1))
 done
 
-insmod /vams_pci.ko probe_irq_selftest=1 ||
-	fail 'normal probe or MSI-X self-test failed'
+insmod /vams_pci.ko probe_irq_selftest=1 probe_nop_selftest=1 ||
+	fail 'normal probe, MSI-X, or NOP round-trip self-test failed'
 [ -L "$vams_device/driver" ] || fail 'device did not bind'
 [ "$(basename "$(readlink "$vams_device/driver")")" = 'vams_pci' ] ||
 	fail 'device bound to the wrong driver'

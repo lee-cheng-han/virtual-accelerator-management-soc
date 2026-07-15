@@ -10,7 +10,7 @@ SPEC_DOCS := README.md \
 	docs/verification-plan.md docs/performance-plan.md docs/demo.md \
 	docs/minimal-riscv-subsystem.md docs/zephyr-board-port.md \
 	docs/management-peripherals.md docs/pcie-endpoint.md \
-	docs/linux-pci-driver.md
+	docs/linux-pci-driver.md docs/nop-command-path.md
 
 CROSS_COMPILE ?= riscv64-unknown-elf-
 QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
@@ -19,6 +19,8 @@ KERNEL_BUILD ?= /lib/modules/$(shell uname -r)/build
 VAMS_LINUX_IMAGE ?=
 VAMS_PCI_MODULE ?= $(CURDIR)/kernel/vams_pci.ko
 BUSYBOX ?= busybox
+HOST_CC ?= gcc
+HOST_CLANG ?= clang
 VAMS_FIRMWARE ?= $(CURDIR)/build/firmware/baremetal/vams-riscv-fw.elf
 ZEPHYR_BASE ?= $(CURDIR)/build/zephyrproject/zephyr
 ZEPHYR_VENV ?= $(CURDIR)/build/zephyr-venv
@@ -27,9 +29,9 @@ ZEPHYR_WATCHDOG_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-watchdog
 VAMS_ZEPHYR_FIRMWARE ?= $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 
-.PHONY: help check check-docs firmware smoke zephyr-prepare zephyr \
+.PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
-	watchdog-smoke pcie-smoke kernel kernel-test-build kernel-smoke \
+	watchdog-smoke pcie-smoke nop-smoke kernel kernel-test-build kernel-smoke \
 	qemu-patch-check tree clean demo
 
 help:
@@ -51,6 +53,8 @@ help:
 	  '  make watchdog-smoke' \
 	  '                   Verify watchdog reset and firmware recovery' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
+	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
+	  '  make abi-check    Regenerate-check and compile-test the v1 ABI' \
 	  '  make kernel       Build the production vams_pci kernel module' \
 	  '  make kernel-smoke Build and test probe, MSI-X, and cleanup in a guest' \
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
@@ -59,7 +63,7 @@ help:
 	  '  make demo        Explain full-demo availability' \
 	  '  make clean       Remove generated output'
 
-check: check-docs
+check: check-docs abi-check
 
 check-docs:
 	@set -eu; \
@@ -69,10 +73,21 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'PCIe endpoint and Linux discovery driver implemented' README.md; \
+	grep -q 'Coherent NOP queue transport implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
+
+abi-check:
+	./scripts/gen-vams-abi.py --check
+	./tests/abi/test-vams-abi.py
+	@mkdir -p build/tests
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -Iinclude \
+		tests/abi/test-vams-abi.c -o build/tests/test-vams-abi-gcc
+	./build/tests/test-vams-abi-gcc
+	$(HOST_CLANG) -std=c11 -Wall -Wextra -Wpedantic -Werror -Iinclude \
+		tests/abi/test-vams-abi.c -o build/tests/test-vams-abi-clang
+	./build/tests/test-vams-abi-clang
 
 firmware:
 	$(MAKE) -C firmware/baremetal CROSS_COMPILE="$(CROSS_COMPILE)"
@@ -148,6 +163,10 @@ pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
 
+nop-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/smoke-vams-nop.sh
+
 kernel:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)"
 
@@ -180,6 +199,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0002-hw-add-vams-management-peripherals.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0004-hw-misc-add-vams-nop-queue-transport.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

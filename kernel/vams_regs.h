@@ -14,9 +14,28 @@
 #define VAMS_REG_MAX_TRANSFER          0x014U
 #define VAMS_REG_QUEUE_LIMITS          0x018U
 #define VAMS_REG_DEVICE_STATUS         0x01cU
+#define VAMS_REG_DEVICE_CONTROL        0x020U
 #define VAMS_REG_ERROR_STATUS          0x024U
 #define VAMS_REG_RESET_GENERATION      0x028U
 #define VAMS_REG_LAST_FATAL            0x02cU
+
+#define VAMS_REG_SQ_BASE_LO            0x100U
+#define VAMS_REG_SQ_BASE_HI            0x104U
+#define VAMS_REG_SQ_DEPTH              0x108U
+#define VAMS_REG_SQ_HEAD               0x10cU
+#define VAMS_REG_SQ_TAIL               0x110U
+#define VAMS_REG_SQ_DOORBELL           0x114U
+#define VAMS_REG_SQ_CONTROL            0x118U
+#define VAMS_REG_SQ_STATUS             0x11cU
+
+#define VAMS_REG_CQ_BASE_LO            0x200U
+#define VAMS_REG_CQ_BASE_HI            0x204U
+#define VAMS_REG_CQ_DEPTH              0x208U
+#define VAMS_REG_CQ_HEAD               0x20cU
+#define VAMS_REG_CQ_TAIL               0x210U
+#define VAMS_REG_CQ_DOORBELL           0x214U
+#define VAMS_REG_CQ_CONTROL            0x218U
+#define VAMS_REG_CQ_STATUS             0x21cU
 
 #define VAMS_REG_INTR_STATUS           0x300U
 #define VAMS_REG_INTR_MASK             0x304U
@@ -37,6 +56,7 @@
 
 #define VAMS_STATUS_READY              BIT(0)
 #define VAMS_STATUS_FW_RUNNING         BIT(1)
+#define VAMS_STATUS_QUEUES_READY       BIT(2)
 #define VAMS_STATUS_RESETTING          BIT(4)
 #define VAMS_STATUS_FATAL              BIT(5)
 
@@ -47,6 +67,15 @@
 #define VAMS_INTR_ASYNC                (VAMS_INTR_ERROR | VAMS_INTR_FW_EVENT | \
 					 VAMS_INTR_RESET_DONE)
 #define VAMS_INTR_ALL                  (VAMS_INTR_CQ | VAMS_INTR_ASYNC)
+
+#define VAMS_DEVICE_ENABLE             BIT(0)
+#define VAMS_DEVICE_QUIESCE            BIT(2)
+
+#define VAMS_QUEUE_ENABLE              BIT(0)
+#define VAMS_QUEUE_RESET               BIT(1)
+#define VAMS_QUEUE_STATUS_ENABLED      BIT(0)
+
+#define VAMS_QUEUE_DEPTH               16U
 
 #define VAMS_MSIX_VECTORS              2
 #define VAMS_MSIX_CQ_VECTOR            0

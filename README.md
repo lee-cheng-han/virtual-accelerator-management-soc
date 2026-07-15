@@ -6,12 +6,12 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **PCIe endpoint and Linux discovery driver implemented.** The
+> Status: **Coherent NOP queue transport implemented.** The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
-> watchdog recovery, and telemetry. The host-facing `vams-pcie` endpoint now
-> enumerates with BAR0 and two MSI-X vectors, while `vams_pci.ko` validates and
-> binds it with tested cleanup paths. DMA queues and the full demo remain
-> planned.
+> watchdog recovery, and telemetry. The host-facing endpoint and `vams_pci.ko`
+> now execute a generated-ABI NOP through coherent SQ/CQ DMA and MSI-X. QEMU
+> currently provides the NOP validation reference; bridging queue ownership to
+> the embedded firmware and the full demo remain planned.
 
 ## Architecture
 
@@ -57,9 +57,13 @@ internal management peripheral, not the host datapath.
 - QTest MMIO, mailbox, and forced-watchdog-reset regressions
 - QEMU `vams-pcie` processing-accelerator endpoint with BAR0 and two MSI-X vectors
 - PCI enumeration, MMIO error, MSI-X pending, and asynchronous-reset QTest
-- Thin `vams_pci` discovery driver with ABI validation and 64/32-bit DMA-mask negotiation
+- Thin `vams_pci` queue driver with ABI validation and 64/32-bit DMA-mask negotiation
 - Two-vector MSI-X handling with reverse-order probe/remove cleanup
-- Disposable Linux guest test covering seven injected probe failures, both IRQs, and rebinding
+- Disposable Linux guest test covering eight injected probe failures, both IRQs, and rebinding
+- Authoritative JSON v1 ABI with generated portable, QEMU, and kernel headers
+- One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
+- Successful and invalid NOP completions through QTest raw guest memory
+- Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -104,6 +108,9 @@ make watchdog-smoke \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make nop-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make abi-check
 make kernel KERNEL_BUILD=/path/to/linux/build
 make kernel-smoke \
   KERNEL_BUILD=/path/to/linux/build \
@@ -137,6 +144,7 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [Management peripherals](docs/management-peripherals.md) | Mailbox, watchdog, reset, telemetry, and tests |
 | [PCIe endpoint](docs/pcie-endpoint.md) | PCI identity, BAR0, MSI-X, reset, and QTest contract |
 | [Linux PCI driver](docs/linux-pci-driver.md) | Probe/remove, ABI validation, IRQs, cleanup, and guest test |
+| [NOP command path](docs/nop-command-path.md) | Generated ABI, coherent rings, ordering, NOP, and limitations |
 
 ## Planned repository areas
 
@@ -150,9 +158,11 @@ scaffolding and gain tracked files only when their components are built.
 
 - The RISC-V management subsystem and PCIe endpoint shell are executable, but
   they are not connected into one private device instance yet.
-- The endpoint advertises only MSI-X. The Linux driver binds in discovery mode;
-  queue, DMA, engine, firmware, telemetry, and debug capabilities remain clear
-  until their host-facing paths work.
+- The endpoint advertises DMA, MSI-X, and polling-safe CQ for its NOP queue
+  transport. Payload engines, firmware bridge, telemetry, and debug capabilities
+  remain clear until their host-facing paths work.
+- NOP validation currently executes in QEMU, not Zephyr firmware, so the final
+  firmware-owned command-plane requirement is not yet accepted.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

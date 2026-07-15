@@ -3,8 +3,9 @@
 ## Implemented scope
 
 The QEMU type `vams-pcie` is a PCI Express processing-accelerator endpoint. It
-provides the host-visible identity/control foundation without claiming that
-queues, DMA, firmware bridging, or accelerator commands work yet.
+provides the host-visible identity/control foundation plus one coherent NOP
+queue transport. Firmware bridging and payload accelerator commands do not work
+yet.
 
 | PCI field | Value |
 |---|---:|
@@ -29,7 +30,7 @@ The following registers implement the behavior defined by the
 | `0x004` | `VAMS_HW_IF_VERSION` | `0x00010000` |
 | `0x008` | `VAMS_FW_VERSION` | Zero until firmware integration |
 | `0x00c` | `VAMS_DESC_VERSION` | Descriptor format 1 |
-| `0x010` | `VAMS_CAPABILITIES` | `0x00000002`, MSI-X only |
+| `0x010` | `VAMS_CAPABILITIES` | `0x00000023`, DMA, MSI-X, polling-safe CQ |
 | `0x014` | `VAMS_MAX_TRANSFER` | 16 MiB architectural limit |
 | `0x018` | `VAMS_QUEUE_LIMITS` | Depth range 16–1024 |
 | `0x01c` | `VAMS_DEVICE_STATUS` | READY or RESETTING |
@@ -42,15 +43,16 @@ The following registers implement the behavior defined by the
 | `0x308` | `VAMS_INTR_FORCE` | Deterministic source assertion |
 | `0x30c` | `VAMS_INTR_COALESCE` | Reset value 1 only |
 
-All other BAR0 offsets are deliberately unimplemented. They return all ones,
+The SQ block at `0x100–0x11f` and CQ block at `0x200–0x21f` implement the
+normative base, depth, index, doorbell, control, and status registers. Other
+BAR0 offsets are deliberately unimplemented. They return all ones,
 ignore writes, and set `VAMS_ERR_ILLEGAL_MMIO`. Accesses that are not aligned
 32-bit operations behave the same way. RO writes, reserved-bit writes, and
 invalid configuration requests set their distinct normative error bits.
 
-The static descriptor and queue-limit values describe the version that later
-queue support will implement; the DMA capability remains clear, so software
-must not configure or enable queues. An ENABLE request is rejected with
-`VAMS_ERR_BAD_CONFIG`.
+Device ENABLE requires configured enabled SQ/CQ registers and PCI bus mastering.
+The DMA capability covers descriptor and completion transport for NOP; it does
+not imply that payload DMA operations work.
 
 ## Interrupt and reset behavior
 
@@ -87,11 +89,12 @@ The QTest smoke uses a Q35 PCIe root bus and verifies:
 - every currently implemented BAR0 reset value;
 - source-to-vector mapping for vectors 0 and 1 while PCI MSI-X is masked;
 - W1C, RO-write, reserved-write, invalid-width, and unimplemented-offset errors;
-- rejection of ENABLE while queue/DMA capabilities are absent; and
+- rejection of ENABLE before valid queues and bus mastering are configured; and
 - asynchronous RESETTING → READY behavior, generation increment, and
   RESET_DONE publication.
 
 The Linux `vams_pci` driver now validates this contract, installs both MSI-X
 handlers, and is exercised by a disposable-guest probe/failure/remove test. See
-the [Linux PCI driver guide](linux-pci-driver.md). Queue and DMA registers remain
-the next endpoint expansion.
+the [Linux PCI driver guide](linux-pci-driver.md). `nop-smoke` separately
+verifies coherent DMA ordering, descriptor validation, completion bytes,
+doorbells, interrupts, and queue reset.

@@ -22,11 +22,11 @@ documentation checks only. Planned tests are not reported as passing.
 | SYS-01/02 | boot console golden output plus timer/interrupt/reset QTests |
 | SYS-03 | Zephyr boot, task synchronization, mailbox/telemetry, and watchdog-reset tests |
 | PCI-01 | config-space/BAR/MSI-X QTest plus guest enumeration, IRQ, probe/remove, and rebind smoke |
-| ABI-01/02 | descriptor byte-layout compile test, table-driven validation, ring model/property tests |
+| ABI-01/02 | generated descriptor byte-layout compile/raw tests and NOP queue QTest; firmware validation/property tests pending |
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |
 | FLT-01 | one-shot trigger, expected evidence, clean NOP after every fault |
-| LNX-01 | discovery probe resources have forced cleanup tests; queue/concurrent lifetime cases begin with command transport |
+| LNX-01 | PCI and coherent-ring probe resources have forced cleanup tests; public request/concurrent lifetime cases remain |
 
 ## Required cases
 
@@ -76,7 +76,7 @@ git diff --check
 `make check` verifies required documents, descriptor assertions as text, the
 status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`, and
-`watchdog-smoke`. PCI validation uses `pcie-smoke` and `kernel-smoke`; the latter
-boots a disposable Linux initramfs and exercises real module binding and MSI-X.
-Descriptor layout checks remain textual until the generated command ABI and
-compiled raw-byte tests are introduced with the host path.
+`watchdog-smoke`. PCI validation uses `pcie-smoke`, `nop-smoke`, and
+`kernel-smoke`; the latter boots a disposable Linux initramfs and exercises
+coherent queues, a real NOP completion interrupt, module binding, and cleanup.
+`abi-check` verifies generated headers plus compiled and raw-byte layouts.

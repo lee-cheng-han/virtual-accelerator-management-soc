@@ -4,6 +4,10 @@ This document is normative for descriptor version 1. All fields are
 little-endian integers in host DMA memory. Software must use endian conversion;
 C layout alone does not define wire encoding.
 
+The machine-readable source is [`abi/vams-v1.json`](../abi/vams-v1.json).
+Generated consumer headers must match it under `make abi-check`; the C snippets
+below describe the same wire contract and are not independent definitions.
+
 ## Submission descriptor
 
 ```c
@@ -177,4 +181,3 @@ reset does not rely on CQ availability: accepted commands receive RESET status
 only when the CQ remains operational; otherwise the driver completes its local
 requests with reset error. Reset generation is the authoritative boundary.
 Pre-reset asynchronous callbacks are discarded and may not publish entries.
-

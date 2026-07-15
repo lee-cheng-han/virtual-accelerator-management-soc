@@ -19,11 +19,12 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 | **9 — Stress/performance** | Model/property queue tests, ring wrap, million-command and long-duration runs, repeated reset, histogram, throughput, stack/SRAM use, watchdog margin and queue high-water report. |
 | **10 — CI/demo** | Pinned reproducible builds, compatibility matrix, coverage/static analysis/fuzzing and layered tests in CI; unified trace export; `make demo` boots, submits, verifies, faults, recovers, and reports PASS/FAIL. |
 
-Current gate: the PCIe endpoint is accepted. QEMU provides identity, BAR0, two
-MSI-X vectors, strict MMIO errors, asynchronous reset, migration state, and
-focused QTest coverage. The warning-clean Linux `vams_pci` driver validates the
-ABI, binds in discovery mode, handles both vectors, and passes deterministic
-guest probe-failure, remove, and rebind tests. The command path is next.
+Current gate: command transport is in progress. The generated v1 ABI, coherent
+SQ/CQ allocation, checked doorbells, QEMU PCI DMA ordering, NOP validation and
+completion, MSI-X draining, paired queue reset, and Linux guest round trip are
+implemented. The gate remains open until queue events and validation are owned
+by the embedded RISC-V firmware, driver request tracking/polling exists, and the
+public host API completes an ID/cookie round trip.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a

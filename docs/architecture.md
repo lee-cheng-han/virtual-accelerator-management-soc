@@ -34,8 +34,10 @@ production ID.
 
 The implemented `vams_pci` driver validates the endpoint identity and interface,
 negotiates a coherent DMA mask, owns BAR0, installs both MSI-X handlers, and
-binds in discovery mode. It enables PCI bus mastering for MSI-X messages but
-does not allocate queues or permit payload DMA while capability bit 0 is clear.
+allocates one coherent SQ/CQ pair when capability bit 0 is set. The current NOP
+transport is executed in the QEMU endpoint as a reference path; command-event
+routing and validation must move behind the embedded RISC-V firmware boundary
+before the target architecture is complete.
 
 ## Address spaces
 

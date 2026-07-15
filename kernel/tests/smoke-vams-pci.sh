@@ -63,13 +63,13 @@ if [ "$status" -ne 1 ] && [ "$status" -ne 0 ]; then
 	echo "QEMU guest exited unexpectedly with status $status" >&2
 	exit 1
 fi
-if ! grep -q 'VAMS Linux PCI probe, MSI-X, and cleanup smoke test: PASS' \
+if ! grep -q 'VAMS Linux PCI queue, NOP, MSI-X, and cleanup smoke test: PASS' \
 	"$tmp/console.log"; then
 	cat "$tmp/console.log"
 	echo 'guest did not report a passing VAMS PCI driver test' >&2
 	exit 1
 fi
 
-grep -E 'VAMS test device:|injecting probe failure|MSI-X self-test passed|ready:|PASS' \
+grep -E 'VAMS test device:|injecting probe failure|MSI-X self-test passed|NOP round trip passed|ready:|PASS' \
 	"$tmp/console.log"
 echo 'VAMS Linux PCI guest integration test: PASS'

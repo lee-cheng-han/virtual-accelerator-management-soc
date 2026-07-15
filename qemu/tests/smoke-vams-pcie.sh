@@ -64,7 +64,7 @@ printf '%s\n' \
     'writel 0xfebf0024 0x4' \
     'writel 0xfebf0304 0x10' \
     'readl 0xfebf0024' \
-    'readl 0xfebf0100' \
+    'readl 0xfebf0400' \
     'readl 0xfebf0024' \
     'writel 0xfebf0024 0x3ff' \
     'writel 0xfebf0300 0xf' \
@@ -109,7 +109,7 @@ expected=$(printf '%s\n' \
     'OK 0x0000000011001b36' \
     'OK 0x0000000000010000' \
     'OK 0x0000000000000001' \
-    'OK 0x0000000000000002' \
+    'OK 0x0000000000000023' \
     'OK 0x0000000001000000' \
     'OK 0x0000000004000010' \
     'OK 0x0000000000000001' \

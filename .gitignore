@@ -30,10 +30,10 @@ test-results/
 
 # Editors and local configuration
 .cache/
+__pycache__/
 .clangd/
 .idea/
 .vscode/
 *~
 *.swp
 .DS_Store
-

@@ -1,0 +1,65 @@
+{
+  "descriptor_version": 1,
+  "submission_size": 64,
+  "completion_size": 32,
+  "opcodes": {
+    "NOP": 0,
+    "MEM_COPY": 1,
+    "MEM_FILL": 2,
+    "CRC32": 3,
+    "VECTOR_ADD": 4
+  },
+  "completion_status": {
+    "SUCCESS": 0,
+    "INVALID": 1,
+    "FAILED": 2,
+    "TIMED_OUT": 3,
+    "CANCELLED": 4,
+    "RESET": 5
+  },
+  "error_codes": {
+    "NONE": 0,
+    "UNSUPPORTED_VERSION": 1,
+    "INVALID_OPCODE": 2,
+    "INVALID_FLAGS": 3,
+    "RESERVED_NONZERO": 4,
+    "DUPLICATE_ID": 5,
+    "INVALID_LENGTH": 6,
+    "INVALID_ALIGNMENT": 7,
+    "ADDRESS_OVERFLOW": 8,
+    "INVALID_ADDRESS": 9,
+    "INVALID_TIMEOUT": 10,
+    "DMA_READ": 16,
+    "DMA_WRITE": 17,
+    "ENGINE": 18,
+    "TIMEOUT": 19,
+    "CRC_MISMATCH": 20,
+    "RESET": 21,
+    "QUEUE_RESET": 22,
+    "DEVICE_FATAL": 23
+  },
+  "submission": [
+    ["version", "u16"],
+    ["opcode", "u8"],
+    ["flags", "u8"],
+    ["command_id", "u32"],
+    ["source_dma", "u64"],
+    ["destination_dma", "u64"],
+    ["length", "u32"],
+    ["timeout_ms", "u32"],
+    ["user_cookie", "u64"],
+    ["expected_crc", "u32"],
+    ["reserved0", "u32"],
+    ["reserved1", "u64"],
+    ["reserved2", "u64"]
+  ],
+  "completion": [
+    ["command_id", "u32"],
+    ["status", "u16"],
+    ["error_code", "u16"],
+    ["bytes_processed", "u32"],
+    ["result_crc", "u32"],
+    ["user_cookie", "u64"],
+    ["device_timestamp", "u64"]
+  ]
+}
