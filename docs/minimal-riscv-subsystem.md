@@ -17,12 +17,13 @@ Implemented:
   machine-timer interrupt test;
 - a smoke test that verifies the complete boot transcript.
 
-The QEMU machine also implements the firmware-facing mailbox, watchdog, reset,
-and telemetry regions. Those behaviors and the Zephyr drivers are documented
+The QEMU machine also implements the firmware-facing command portal, mailbox,
+watchdog, reset, and telemetry regions. Those behaviors and the Zephyr drivers are documented
 in the [management-peripheral contract](management-peripherals.md) and
 [Zephyr board guide](zephyr-board-port.md). PCIe, BAR registers, DMA,
-accelerator engines, the Linux driver, userspace, and the production queue ABI
-remain outside this subsystem.
+accelerator engines, the Linux driver, userspace, and PCI queue integration
+remain outside this subsystem. The portal deliberately uses the production
+descriptor/completion ABI while remaining private to the firmware harness.
 
 ## Platform contract
 
@@ -34,6 +35,7 @@ remain outside this subsystem.
 | UART | `0x10000000` | 8 bytes | 16550 register window |
 | Mailbox | `0x10010000` | 4 KiB | Firmware event bridge |
 | Management control | `0x10020000` | 4 KiB | Watchdog, reset, telemetry |
+| Command portal | `0x10030000` | 4 KiB | Descriptor/completion staging |
 | SRAM | `0x80000000` | 512 KiB | Firmware, data, and stack |
 
 The reset ROM transfers control to the ELF entry point in SRAM. The firmware
@@ -76,6 +78,8 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0004-hw-misc-add-vams-nop-queue-transport.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"
 ```
 
 Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both

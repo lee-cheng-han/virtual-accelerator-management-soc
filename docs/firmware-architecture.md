@@ -4,6 +4,12 @@ The release-1 firmware is a Zephyr application for `vams_riscv` on one
 RV32IMAC hart. It is the command-policy owner. Hardware owns DMA mechanics and
 register side effects; the host owns buffer mapping and ring production.
 
+The current standalone harness implements the first policy slice as one polling
+command-service task: it captures a generated-ABI descriptor from the private
+portal, acknowledges ownership, validates NOP in fixed first-error order, and
+publishes the completion. The task decomposition below remains the target for
+PCI DMA, scheduling, payload execution, and recovery.
+
 ## Boot and steady state
 
 Boot ROM establishes stack/trap state and enters an SRAM image. Firmware clears
@@ -104,4 +110,3 @@ and causes the driver to discard prior-generation requests.
 Structured logs contain event ID, severity, command ID when valid, generation,
 timestamp, and two numeric arguments. They contain no host buffer data or raw
 pointers. Logging is diagnostic and never part of correctness.
-

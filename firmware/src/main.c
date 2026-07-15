@@ -9,9 +9,12 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/version.h>
 
+#include <vams_command.h>
+#include <vams_command_portal.h>
 #include <vams_mailbox.h>
 #include <vams_management.h>
 
@@ -34,14 +37,18 @@ static struct k_msgq vams_heartbeat_queue;
 K_THREAD_STACK_DEFINE(vams_producer_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_monitor_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_mailbox_stack, VAMS_TASK_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_command_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_health_stack, VAMS_TASK_STACK_SIZE);
 
+static const struct device *const command_portal =
+	DEVICE_DT_GET(DT_NODELABEL(command0));
 static const struct device *const mailbox = DEVICE_DT_GET(DT_NODELABEL(mailbox0));
 static const struct device *const management =
 	DEVICE_DT_GET(DT_NODELABEL(management0));
 static struct k_thread vams_producer_thread;
 static struct k_thread vams_monitor_thread;
 static struct k_thread vams_mailbox_thread;
+static struct k_thread vams_command_thread;
 static struct k_thread vams_health_thread;
 static atomic_t producer_epoch;
 static atomic_t monitor_epoch;
@@ -117,6 +124,36 @@ static void vams_mailbox_service(void *unused1, void *unused2, void *unused3)
 	}
 }
 
+static void vams_command_service(void *unused1, void *unused2, void *unused3)
+{
+	ARG_UNUSED(unused1);
+	ARG_UNUSED(unused2);
+	ARG_UNUSED(unused3);
+
+	for (;;) {
+		struct vams_submission submission;
+		struct vams_completion completion;
+		int status;
+
+		status = vams_command_receive(command_portal, &submission, K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+		vams_command_execute(&submission, &completion, k_uptime_get());
+		do {
+			status = vams_command_complete(command_portal, &completion);
+			if (status == -EBUSY) {
+				k_sleep(K_MSEC(1));
+			}
+		} while (status == -EBUSY);
+		__ASSERT_NO_MSG(status == 0);
+		printk("Command: id=0x%08" PRIx32 " status=%" PRIu16
+		       " error=%" PRIu16 " cookie=0x%016" PRIx64 "\n",
+		       sys_le32_to_cpu(completion.command_id),
+		       sys_le16_to_cpu(completion.status),
+		       sys_le16_to_cpu(completion.error_code),
+		       sys_le64_to_cpu(completion.user_cookie));
+	}
+}
+
 static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 {
 	const struct vams_management_snapshot *boot_snapshot = arg1;
@@ -183,6 +220,7 @@ int main(void)
 		     sizeof(struct vams_heartbeat), 4);
 	__ASSERT_NO_MSG(device_is_ready(mailbox));
 	__ASSERT_NO_MSG(device_is_ready(management));
+	__ASSERT_NO_MSG(device_is_ready(command_portal));
 
 	vams_management_snapshot(management, &boot_snapshot);
 	printk("Reset: reason=%" PRIu32 " watchdog_count=%" PRIu32
@@ -218,6 +256,13 @@ int main(void)
 	status = k_thread_name_set(&vams_mailbox_thread, "vams_mailbox");
 	__ASSERT_NO_MSG(status == 0);
 
+	(void)k_thread_create(&vams_command_thread, vams_command_stack,
+			      K_THREAD_STACK_SIZEOF(vams_command_stack),
+			      vams_command_service, NULL, NULL, NULL,
+			      VAMS_TASK_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_command_thread, "vams_command");
+	__ASSERT_NO_MSG(status == 0);
+
 	(void)k_thread_create(&vams_health_thread, vams_health_stack,
 			      K_THREAD_STACK_SIZEOF(vams_health_stack),
 			      vams_health_monitor, &boot_snapshot, NULL, NULL,
@@ -226,10 +271,11 @@ int main(void)
 	__ASSERT_NO_MSG(status == 0);
 
 	printk("Tasks: producer -> message queue -> monitor\n");
-	printk("Services: mailbox, watchdog, reset telemetry\n");
+	printk("Services: command portal, mailbox, watchdog, reset telemetry\n");
 	k_thread_start(&vams_monitor_thread);
 	k_thread_start(&vams_producer_thread);
 	k_thread_start(&vams_mailbox_thread);
+	k_thread_start(&vams_command_thread);
 	k_thread_start(&vams_health_thread);
 
 	return 0;

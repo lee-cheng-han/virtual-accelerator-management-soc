@@ -1,0 +1,9 @@
+description: VAMS private firmware command portal
+
+compatible: "vams,command-portal"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true

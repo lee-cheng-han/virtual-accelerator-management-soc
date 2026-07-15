@@ -31,7 +31,8 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
-	watchdog-smoke pcie-smoke nop-smoke kernel kernel-test-build kernel-smoke \
+	watchdog-smoke command-portal-smoke firmware-command-smoke \
+	pcie-smoke nop-smoke kernel kernel-test-build kernel-smoke \
 	qemu-patch-check tree clean demo
 
 help:
@@ -52,6 +53,10 @@ help:
 	  '                   Verify the management register contract' \
 	  '  make watchdog-smoke' \
 	  '                   Verify watchdog reset and firmware recovery' \
+	  '  make command-portal-smoke' \
+	  '                   Verify the private firmware portal state machine' \
+	  '  make firmware-command-smoke' \
+	  '                   Verify firmware-owned NOP validation and completion' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make abi-check    Regenerate-check and compile-test the v1 ABI' \
@@ -73,7 +78,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Coherent NOP queue transport implemented' README.md; \
+	grep -q 'Firmware-owned NOP validation implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -159,6 +164,16 @@ watchdog-smoke: zephyr-watchdog
 	VAMS_WATCHDOG_FIRMWARE="$(VAMS_WATCHDOG_FIRMWARE)" \
 	./qemu/tests/smoke-vams-watchdog.sh
 
+command-portal-smoke: firmware
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	VAMS_FIRMWARE="$(VAMS_FIRMWARE)" \
+	./qemu/tests/smoke-vams-command-portal.sh
+
+firmware-command-smoke: zephyr
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
+	./qemu/tests/smoke-vams-firmware-command.sh
+
 pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
@@ -203,6 +218,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0003-hw-misc-add-vams-pcie-endpoint.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0004-hw-misc-add-vams-nop-queue-transport.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0004-hw-misc-add-vams-nop-queue-transport.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

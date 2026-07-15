@@ -7,6 +7,8 @@ project(vams_management_firmware)
 target_include_directories(app PRIVATE include)
 target_sources(app PRIVATE
   src/main.c
+  src/command/vams_command.c
+  drivers/vams_command_portal.c
   drivers/vams_mailbox.c
   drivers/vams_management.c
 )

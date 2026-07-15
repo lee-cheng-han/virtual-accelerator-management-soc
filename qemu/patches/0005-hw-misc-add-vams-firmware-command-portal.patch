@@ -1,0 +1,332 @@
+Subject: [PATCH] hw/misc: add VAMS firmware command portal
+
+Add a private descriptor/completion staging portal to the management
+peripheral and map it into the RISC-V subsystem.  The ownership handshake,
+overflow reporting, counters, reset state, and backward-compatible migration
+state provide the boundary needed for firmware-owned command validation.
+
+---
+--- a/hw/misc/vams_mgmt.c
++++ b/hw/misc/vams_mgmt.c
+@@ -5,6 +5,8 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "hw/misc/vams_abi.h"
+ #include "hw/misc/vams_mgmt.h"
+ #include "hw/core/irq.h"
+ #include "hw/core/qdev-properties.h"
+@@ -22,6 +24,26 @@
+ };
+ 
+ enum {
++    VAMS_COMMAND_STATUS = 0x00,
++    VAMS_COMMAND_HOST_SUBMIT = 0x04,
++    VAMS_COMMAND_FW_ACK = 0x08,
++    VAMS_COMMAND_FW_COMPLETE = 0x0c,
++    VAMS_COMMAND_HOST_ACK = 0x10,
++    VAMS_COMMAND_SUBMIT_COUNT = 0x14,
++    VAMS_COMMAND_COMPLETE_COUNT = 0x18,
++    VAMS_COMMAND_SUBMISSION = 0x100,
++    VAMS_COMMAND_COMPLETION = 0x200,
++};
++
++enum {
++    VAMS_COMMAND_H2F_PENDING = BIT(0),
++    VAMS_COMMAND_F2H_PENDING = BIT(1),
++    VAMS_COMMAND_H2F_OVERFLOW = BIT(2),
++    VAMS_COMMAND_F2H_OVERFLOW = BIT(3),
++    VAMS_COMMAND_PROTOCOL_ERROR = BIT(4),
++};
++
++enum {
+     VAMS_MAILBOX_H2F_PENDING = BIT(0),
+     VAMS_MAILBOX_F2H_PENDING = BIT(1),
+     VAMS_MAILBOX_H2F_OVERFLOW = BIT(2),
+@@ -58,11 +80,14 @@
+ #define VAMS_WDT_MIN_TIMEOUT_MS 100
+ #define VAMS_WDT_MAX_TIMEOUT_MS 60000
+ #define VAMS_WDT_PET_MAGIC 0x56414d53
++#define VAMS_COMMAND_WORDS (VAMS_SUBMISSION_SIZE / sizeof(uint32_t))
++#define VAMS_COMPLETION_WORDS (VAMS_COMPLETION_SIZE / sizeof(uint32_t))
+ 
+ struct VamsMgmtState {
+     SysBusDevice parent_obj;
+     MemoryRegion mailbox_mmio;
+     MemoryRegion control_mmio;
++    MemoryRegion command_mmio;
+     qemu_irq mailbox_irq;
+     qemu_irq reset_out;
+     QEMUTimer *watchdog_timer;
+@@ -82,6 +107,12 @@
+     uint32_t mailbox_tx_count;
+     uint32_t reset_generation;
+     uint32_t control_status;
++    uint32_t command_status;
++    uint32_t command_submission[VAMS_COMMAND_WORDS];
++    uint32_t command_completion[VAMS_COMPLETION_WORDS];
++    uint32_t command_submit_count;
++    uint32_t command_complete_count;
++    uint32_t test_command;
+     bool warm_reset_pending;
+ };
+ 
+@@ -120,12 +151,127 @@
+     s->mailbox_message = 0;
+     s->mailbox_response = 0;
+     s->mailbox_status = 0;
++    s->command_status = 0;
++    memset(s->command_submission, 0, sizeof(s->command_submission));
++    memset(s->command_completion, 0, sizeof(s->command_completion));
+     vams_mailbox_update_irq(s);
+     vams_watchdog_reload(s);
+     s->warm_reset_pending = true;
+     qemu_irq_pulse(s->reset_out);
+ }
+ 
++static uint64_t vams_command_read(void *opaque, hwaddr offset,
++                                  unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++
++    if (offset >= VAMS_COMMAND_SUBMISSION &&
++        offset < VAMS_COMMAND_SUBMISSION + VAMS_SUBMISSION_SIZE) {
++        return s->command_submission[
++            (offset - VAMS_COMMAND_SUBMISSION) / sizeof(uint32_t)];
++    }
++    if (offset >= VAMS_COMMAND_COMPLETION &&
++        offset < VAMS_COMMAND_COMPLETION + VAMS_COMPLETION_SIZE) {
++        return s->command_completion[
++            (offset - VAMS_COMMAND_COMPLETION) / sizeof(uint32_t)];
++    }
++
++    switch (offset) {
++    case VAMS_COMMAND_STATUS:
++        return s->command_status;
++    case VAMS_COMMAND_SUBMIT_COUNT:
++        return s->command_submit_count;
++    case VAMS_COMMAND_COMPLETE_COUNT:
++        return s->command_complete_count;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid command read at 0x%"
++                      HWADDR_PRIx "\n", offset);
++        return UINT32_MAX;
++    }
++}
++
++static void vams_command_bad_write(VamsMgmtState *s)
++{
++    s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++}
++
++static void vams_command_write(void *opaque, hwaddr offset, uint64_t value,
++                               unsigned int size)
++{
++    VamsMgmtState *s = opaque;
++    uint32_t value32 = value;
++
++    if (offset >= VAMS_COMMAND_SUBMISSION &&
++        offset < VAMS_COMMAND_SUBMISSION + VAMS_SUBMISSION_SIZE) {
++        if (s->command_status & VAMS_COMMAND_H2F_PENDING) {
++            s->command_status |= VAMS_COMMAND_H2F_OVERFLOW;
++            return;
++        }
++        s->command_submission[
++            (offset - VAMS_COMMAND_SUBMISSION) / sizeof(uint32_t)] = value32;
++        return;
++    }
++    if (offset >= VAMS_COMMAND_COMPLETION &&
++        offset < VAMS_COMMAND_COMPLETION + VAMS_COMPLETION_SIZE) {
++        if (s->command_status & VAMS_COMMAND_F2H_PENDING) {
++            s->command_status |= VAMS_COMMAND_F2H_OVERFLOW;
++            return;
++        }
++        s->command_completion[
++            (offset - VAMS_COMMAND_COMPLETION) / sizeof(uint32_t)] = value32;
++        return;
++    }
++
++    switch (offset) {
++    case VAMS_COMMAND_HOST_SUBMIT:
++        if (value32 != 1 ||
++            (s->command_status & VAMS_COMMAND_H2F_PENDING)) {
++            s->command_status |= VAMS_COMMAND_H2F_OVERFLOW;
++            return;
++        }
++        s->command_status |= VAMS_COMMAND_H2F_PENDING;
++        s->command_submit_count = vams_sat_inc(s->command_submit_count);
++        return;
++    case VAMS_COMMAND_FW_ACK:
++        if (value32 != 1 ||
++            !(s->command_status & VAMS_COMMAND_H2F_PENDING)) {
++            vams_command_bad_write(s);
++            return;
++        }
++        s->command_status &= ~VAMS_COMMAND_H2F_PENDING;
++        return;
++    case VAMS_COMMAND_FW_COMPLETE:
++        if (value32 != 1 ||
++            (s->command_status & (VAMS_COMMAND_H2F_PENDING |
++                                  VAMS_COMMAND_F2H_PENDING))) {
++            s->command_status |= VAMS_COMMAND_F2H_OVERFLOW;
++            return;
++        }
++        s->command_status |= VAMS_COMMAND_F2H_PENDING;
++        s->command_complete_count = vams_sat_inc(s->command_complete_count);
++        return;
++    case VAMS_COMMAND_HOST_ACK:
++        if (value32 != 1 ||
++            !(s->command_status & VAMS_COMMAND_F2H_PENDING)) {
++            vams_command_bad_write(s);
++            return;
++        }
++        s->command_status &= ~VAMS_COMMAND_F2H_PENDING;
++        return;
++    case VAMS_COMMAND_STATUS:
++        s->command_status &= ~(value32 &
++            (VAMS_COMMAND_H2F_OVERFLOW | VAMS_COMMAND_F2H_OVERFLOW |
++             VAMS_COMMAND_PROTOCOL_ERROR));
++        return;
++    default:
++        vams_command_bad_write(s);
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      TYPE_VAMS_MGMT ": invalid command write at 0x%"
++                      HWADDR_PRIx "\n", offset);
++    }
++}
++
+ static void vams_watchdog_expired(void *opaque)
+ {
+     VamsMgmtState *s = opaque;
+@@ -319,17 +465,35 @@
+     },
+ };
+ 
++static const MemoryRegionOps vams_command_ops = {
++    .read = vams_command_read,
++    .write = vams_command_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++        .unaligned = false,
++    },
++};
++
+ static int vams_mgmt_post_load(void *opaque, int version_id)
+ {
+     VamsMgmtState *s = opaque;
+ 
++    if (version_id < 2) {
++        s->command_status = 0;
++        memset(s->command_submission, 0, sizeof(s->command_submission));
++        memset(s->command_completion, 0, sizeof(s->command_completion));
++        s->command_submit_count = 0;
++        s->command_complete_count = 0;
++    }
+     vams_mailbox_update_irq(s);
+     return 0;
+ }
+ 
+ static const VMStateDescription vams_mgmt_vmstate = {
+     .name = TYPE_VAMS_MGMT,
+-    .version_id = 1,
++    .version_id = 2,
+     .minimum_version_id = 1,
+     .post_load = vams_mgmt_post_load,
+     .fields = (const VMStateField[]) {
+@@ -348,6 +512,13 @@
+         VMSTATE_UINT32(mailbox_tx_count, VamsMgmtState),
+         VMSTATE_UINT32(reset_generation, VamsMgmtState),
+         VMSTATE_UINT32(control_status, VamsMgmtState),
++        VMSTATE_UINT32_V(command_status, VamsMgmtState, 2),
++        VMSTATE_UINT32_ARRAY_V(command_submission, VamsMgmtState,
++                               VAMS_COMMAND_WORDS, 2),
++        VMSTATE_UINT32_ARRAY_V(command_completion, VamsMgmtState,
++                               VAMS_COMPLETION_WORDS, 2),
++        VMSTATE_UINT32_V(command_submit_count, VamsMgmtState, 2),
++        VMSTATE_UINT32_V(command_complete_count, VamsMgmtState, 2),
+         VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
+         VMSTATE_END_OF_LIST()
+     },
+@@ -379,6 +550,20 @@
+     s->mailbox_tx_count = 0;
+     s->reset_generation = 0;
+     s->control_status = 0;
++    s->command_status = 0;
++    memset(s->command_submission, 0, sizeof(s->command_submission));
++    memset(s->command_completion, 0, sizeof(s->command_completion));
++    s->command_submit_count = 0;
++    s->command_complete_count = 0;
++    if (s->test_command) {
++        s->command_submission[0] = s->test_command == 2 ? 2 :
++                                   VAMS_DESC_VERSION_1;
++        s->command_submission[1] = 0x56414d53;
++        s->command_submission[8] = 0x55667788;
++        s->command_submission[9] = 0x11223344;
++        s->command_status = VAMS_COMMAND_H2F_PENDING;
++        s->command_submit_count = 1;
++    }
+     s->warm_reset_pending = false;
+     vams_mailbox_update_irq(s);
+ }
+@@ -387,6 +572,10 @@
+ {
+     VamsMgmtState *s = VAMS_MGMT(dev);
+ 
++    if (s->test_command > 2) {
++        error_setg(errp, "test-command must be 0, 1, or 2");
++        return;
++    }
+     s->watchdog_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                      vams_watchdog_expired, s);
+ }
+@@ -400,6 +589,7 @@
+ 
+ static const Property vams_mgmt_properties[] = {
+     DEFINE_PROP_UINT32("test-message", VamsMgmtState, test_message, 0),
++    DEFINE_PROP_UINT32("test-command", VamsMgmtState, test_command, 0),
+ };
+ 
+ static void vams_mgmt_init(Object *obj)
+@@ -411,8 +601,11 @@
+                           TYPE_VAMS_MGMT ".mailbox", VAMS_MMIO_SIZE);
+     memory_region_init_io(&s->control_mmio, obj, &vams_control_ops, s,
+                           TYPE_VAMS_MGMT ".control", VAMS_MMIO_SIZE);
++    memory_region_init_io(&s->command_mmio, obj, &vams_command_ops, s,
++                          TYPE_VAMS_MGMT ".command", VAMS_MMIO_SIZE);
+     sysbus_init_mmio(sbd, &s->mailbox_mmio);
+     sysbus_init_mmio(sbd, &s->control_mmio);
++    sysbus_init_mmio(sbd, &s->command_mmio);
+     sysbus_init_irq(sbd, &s->mailbox_irq);
+     qdev_init_gpio_out_named(DEVICE(obj), &s->reset_out, "reset", 1);
+ }
+@@ -425,7 +618,7 @@
+     dc->vmsd = &vams_mgmt_vmstate;
+     device_class_set_legacy_reset(dc, vams_mgmt_reset);
+     device_class_set_props(dc, vams_mgmt_properties);
+-    dc->desc = "VAMS mailbox, watchdog, reset, and telemetry";
++    dc->desc = "VAMS command, mailbox, watchdog, reset, and telemetry";
+ }
+ 
+ static const TypeInfo vams_mgmt_info = {
+--- a/hw/riscv/vams_riscv.c
++++ b/hw/riscv/vams_riscv.c
+@@ -33,6 +33,7 @@
+     VAMS_UART_BASE = 0x10000000,
+     VAMS_MAILBOX_BASE = 0x10010000,
+     VAMS_CONTROL_BASE = 0x10020000,
++    VAMS_COMMAND_BASE = 0x10030000,
+     VAMS_SRAM_BASE = 0x80000000,
+     VAMS_SRAM_SIZE = 0x00080000,
+ };
+@@ -113,6 +114,7 @@
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(mgmt), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(mgmt), 0, VAMS_MAILBOX_BASE);
+     sysbus_mmio_map(SYS_BUS_DEVICE(mgmt), 1, VAMS_CONTROL_BASE);
++    sysbus_mmio_map(SYS_BUS_DEVICE(mgmt), 2, VAMS_COMMAND_BASE);
+     sysbus_connect_irq(SYS_BUS_DEVICE(mgmt), 0,
+                        qdev_get_gpio_in(DEVICE(&s->cpus.harts[0]), IRQ_M_EXT));
+     qdev_connect_gpio_out_named(mgmt, "reset", 0,

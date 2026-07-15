@@ -8,19 +8,20 @@ allocates both rings with `dma_alloc_coherent()`, programs their 64-bit DMA
 addresses, enables CQ before SQ, enables the device, and drains completions from
 MSI-X vector 0. Capability bits DMA, MSI-X, and polling-safe CQ are advertised.
 
-This is a transport/reference implementation. QEMU currently captures and
-validates NOP descriptors directly because the standalone `vams_riscv` firmware
-harness has not yet been embedded into the PCI function. The model uses the
-normative validation order and wire ABI, but this does not satisfy the final
-requirement that management firmware own validation and command policy. No
-payload opcode is implemented or advertised as working.
+The PCI path remains a transport/reference implementation: QEMU captures and
+validates its NOP descriptors directly because the standalone `vams_riscv`
+firmware harness has not yet been embedded into the PCI function. Separately,
+the private management command portal now stages the same generated descriptor
+for Zephyr, which owns the normative validation order and completion policy.
+The final requirement is not satisfied until PCI DMA and queue events use that
+firmware path. No payload opcode is implemented or advertised as working.
 
 ## Generated ABI
 
 [`abi/vams-v1.json`](../abi/vams-v1.json) is authoritative for descriptor
 version, opcodes, status/error values, field order, and structure sizes.
-`scripts/gen-vams-abi.py` deterministically produces separate portable, Linux,
-and QEMU headers. `make abi-check` fails if any generated output is stale,
+`scripts/gen-vams-abi.py` deterministically produces separate portable,
+firmware, Linux, and QEMU headers. `make abi-check` fails if any generated output is stale,
 compiles exact size/offset assertions with GCC and Clang, and checks fixed raw
 little-endian submission/completion byte strings.
 
@@ -65,8 +66,10 @@ and increments reset generation. Device reset also clears queue configuration.
 Migration state includes all queue configuration, indices, and errors, but
 end-to-end migration with coherent guest memory remains unsupported.
 
-The next work is to connect the PCI queue event and DMA service to the embedded
-RISC-V management subsystem, move validation ownership into Zephyr firmware,
-add driver request tracking and polling fallback, and expose a versioned host
-API. Until then, this path is a tested transport foundation rather than the
-final firmware-owned command plane.
+The private portal uses explicit host-submit, firmware-ack, firmware-complete,
+and host-ack ownership transitions. Its QTest covers overwrite rejection,
+sticky overflow/protocol errors, counters, and exact completion bytes; a Zephyr
+test covers valid and unsupported-version NOPs. The next work is to connect PCI
+queue events and DMA service to this portal, then add driver request tracking,
+polling fallback, and a versioned host API. Until then, the two sides are tested
+foundations rather than one firmware-owned PCI command plane.

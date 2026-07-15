@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "abi" / "vams-v1.json"
 OUTPUTS = {
     "portable": ROOT / "include" / "vams_abi.h",
+    "firmware": ROOT / "firmware" / "include" / "vams_abi.h",
     "kernel": ROOT / "kernel" / "vams_abi.h",
     "qemu": ROOT / "qemu" / "include" / "hw" / "misc" / "vams_abi.h",
 }
@@ -36,12 +37,12 @@ def fields(items: list[list[str]], types: dict[str, str], indent: str) -> str:
 
 
 def render(schema: dict[str, object], dialect: str) -> str:
-    if dialect == "portable":
+    if dialect in ("portable", "firmware"):
         spdx = "MIT"
         includes = "#include <stdint.h>"
         types = {"u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "u64": "uint64_t"}
         packed = "__attribute__((packed))"
-        guard = "VAMS_ABI_H"
+        guard = "VAMS_ABI_H" if dialect == "portable" else "VAMS_FIRMWARE_ABI_H"
     elif dialect == "kernel":
         spdx = "GPL-2.0-only"
         includes = "#include <linux/types.h>"

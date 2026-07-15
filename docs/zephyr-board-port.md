@@ -16,15 +16,15 @@ The port provides:
 - direct machine timer and external interrupt descriptions without a PLIC;
 - a strict-warning Zephyr application with assertions and stack sentinels;
 - producer and monitor tasks communicating through a bounded message queue;
-- mailbox and management-control devicetree bindings and device drivers;
+- command-portal, mailbox, and management-control devicetree bindings and drivers;
+- a generated firmware ABI and firmware-owned NOP validation/completion task;
 - a mailbox service plus progress-epoch health supervision;
 - health-gated watchdog servicing, reset-cause recovery, and telemetry;
-- timer/IPC, mailbox, MMIO, and watchdog-reset QEMU tests.
+- timer/IPC, command portal, mailbox, MMIO, and watchdog-reset QEMU tests.
 
-The application uses four 1024-byte task stacks, four-entry heartbeat and
-mailbox queues, and 250 ms health periods. The validated normal build uses
-34,528 bytes (6.59%) of the 512 KiB SRAM region; the watchdog test image uses
-34,608 bytes (6.60%). These are initial settings, not final worst-case
+The application uses five 1024-byte task stacks, four-entry heartbeat and
+mailbox queues, and 250 ms health periods. The validated normal build with the
+command service uses 37,392 bytes (7.13%) of the 512 KiB SRAM region. These are initial settings, not final worst-case
 stack-sizing evidence.
 
 ## Dependency preparation
@@ -101,6 +101,12 @@ make management-smoke \
 make watchdog-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make command-portal-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make firmware-command-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 ```
 
 The watchdog configuration deliberately withholds the first pet, observes a
@@ -113,8 +119,9 @@ then requires healthy telemetry after recovery. Register details are in the
 - The UART console is polling-only; UART interrupt traffic is not exercised.
 - No PLIC exists. The UART output is wired directly to machine external IRQ,
   matching the minimal QEMU topology.
-- There is no PCIe endpoint, DMA engine, or host command path yet.
-- The current mailbox test injection is a QEMU property; PCIe event routing is
-  the next integration step.
+- The RISC-V machine is not yet embedded in the PCIe endpoint; the private
+  portal stages descriptors instead of fetching them through PCI DMA.
+- Current mailbox and command test injection uses QEMU properties; PCIe event
+  and DMA routing is the next integration step.
 - Stack sentinel and initialized-stack checks are enabled, but measured
   per-thread high-water evidence has not yet been collected.

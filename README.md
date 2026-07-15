@@ -6,12 +6,12 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Coherent NOP queue transport implemented.** The
+> Status: **Firmware-owned NOP validation implemented.** The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
-> watchdog recovery, and telemetry. The host-facing endpoint and `vams_pci.ko`
-> now execute a generated-ABI NOP through coherent SQ/CQ DMA and MSI-X. QEMU
-> currently provides the NOP validation reference; bridging queue ownership to
-> the embedded firmware and the full demo remain planned.
+> watchdog recovery, telemetry, and a private command portal. Zephyr now
+> validates generated-ABI NOP descriptors and publishes completions, while the
+> host-facing endpoint and `vams_pci.ko` exercise coherent SQ/CQ DMA and MSI-X.
+> Connecting those two tested paths inside one PCI function remains planned.
 
 ## Architecture
 
@@ -61,6 +61,8 @@ internal management peripheral, not the host datapath.
 - Two-vector MSI-X handling with reverse-order probe/remove cleanup
 - Disposable Linux guest test covering eight injected probe failures, both IRQs, and rebinding
 - Authoritative JSON v1 ABI with generated portable, QEMU, and kernel headers
+- Generated firmware ABI plus a private descriptor/completion ownership portal
+- Zephyr-owned valid and unsupported-version NOP completions
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
@@ -104,6 +106,12 @@ make management-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make watchdog-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make command-portal-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make firmware-command-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make pcie-smoke \
@@ -161,8 +169,9 @@ scaffolding and gain tracked files only when their components are built.
 - The endpoint advertises DMA, MSI-X, and polling-safe CQ for its NOP queue
   transport. Payload engines, firmware bridge, telemetry, and debug capabilities
   remain clear until their host-facing paths work.
-- NOP validation currently executes in QEMU, not Zephyr firmware, so the final
-  firmware-owned command-plane requirement is not yet accepted.
+- Zephyr owns NOP validation in the standalone management harness, but the PCI
+  queue still uses its QEMU reference validator until the private portal is
+  embedded and connected to PCI DMA.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

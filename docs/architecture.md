@@ -27,7 +27,9 @@ interfaces stabilize. The implemented `vams-pcie` shell connects to QEMU's
 PCIe bus with vendor `0x1b36`, device `0x1100`, revision `0x00`, and class
 `0x120000` (processing accelerator). It currently implements BAR0 identity,
 control/error handling, and MSI-X. The standalone `vams_riscv` machine remains
-the firmware validation harness; the target architecture will embed the same
+the firmware validation harness. Its private command portal now exercises the
+generated descriptor/completion ABI and Zephyr-owned NOP validation; the target
+architecture will embed the same
 management components privately within `vams-pcie`, not expose a second guest
 machine. The development identity is provisional and is not an allocated
 production ID.
@@ -36,7 +38,7 @@ The implemented `vams_pci` driver validates the endpoint identity and interface,
 negotiates a coherent DMA mask, owns BAR0, installs both MSI-X handlers, and
 allocates one coherent SQ/CQ pair when capability bit 0 is set. The current NOP
 transport is executed in the QEMU endpoint as a reference path; command-event
-routing and validation must move behind the embedded RISC-V firmware boundary
+routing and DMA staging must connect that path to the tested firmware portal
 before the target architecture is complete.
 
 ## Address spaces
@@ -55,6 +57,7 @@ The management subsystem initially uses this private physical map:
 | `0x1000_0000–0x1000_0fff` | 4 KiB | UART |
 | `0x1001_0000–0x1001_0fff` | 4 KiB | mailbox/doorbell bridge |
 | `0x1002_0000–0x1002_0fff` | 4 KiB | watchdog/reset/telemetry bridge |
+| `0x1003_0000–0x1003_0fff` | 4 KiB | private firmware command portal |
 | `0x8000_0000–0x8007_ffff` | 512 KiB | firmware SRAM |
 
 The internal peripheral registers are normative in the

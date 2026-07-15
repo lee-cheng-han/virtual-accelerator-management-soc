@@ -34,7 +34,7 @@ if [ "$status" -ne 124 ]; then
 fi
 
 for checkpoint in \
-    'Services: mailbox, watchdog, reset telemetry' \
+    'Services: command portal, mailbox, watchdog, reset telemetry' \
     'Mailbox: request=0x00000001 response=0x80000001' \
     'Telemetry: heartbeat=1 ' \
     'Telemetry: heartbeat=2 ' \

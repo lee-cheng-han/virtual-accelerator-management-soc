@@ -78,5 +78,11 @@
 			reg = <0x10020000 0x1000>;
 			status = "okay";
 		};
+
+		command0: command@10030000 {
+			compatible = "vams,command-portal";
+			reg = <0x10030000 0x1000>;
+			status = "okay";
+		};
 	};
 };
