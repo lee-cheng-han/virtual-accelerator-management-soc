@@ -21,12 +21,12 @@ documentation checks only. Planned tests are not reported as passing.
 |---|---|
 | SYS-01/02 | boot console golden output plus timer/interrupt/reset QTests |
 | SYS-03 | Zephyr boot, task synchronization, mailbox/telemetry, and watchdog-reset tests |
-| PCI-01 | config-space/BAR/MSI-X QTest; guest `lspci`/probe log remains pending |
+| PCI-01 | config-space/BAR/MSI-X QTest plus guest enumeration, IRQ, probe/remove, and rebind smoke |
 | ABI-01/02 | descriptor byte-layout compile test, table-driven validation, ring model/property tests |
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |
 | FLT-01 | one-shot trigger, expected evidence, clean NOP after every fault |
-| LNX-01 | forced failure at each acquired probe resource and concurrent lifetime tests |
+| LNX-01 | discovery probe resources have forced cleanup tests; queue/concurrent lifetime cases begin with command transport |
 
 ## Required cases
 
@@ -44,8 +44,10 @@ cookie extremes, and first-error precedence. Successful data commands compare
 all output bytes; failed commands treat destination as unspecified but verify no
 out-of-range access using guard pages/canaries.
 
-Driver tests force failure after PCI enable, BAR map, DMA mask, ring allocation,
-and each IRQ registration; cleanup must be leak-free. They cover blocking and
+Current driver tests force failure after PCI enable, BAR reservation/map, DMA
+mask negotiation, vector allocation, and each IRQ registration, followed by a
+successful bind/remove/rebind cycle. Queue driver tests will add forced ring
+allocation failure; cleanup must remain leak-free. They cover blocking and
 nonblocking backpressure, close with requests outstanding, unknown/duplicate
 completion, lost interrupt polling, reset serialization, concurrent users,
 remove during idle, and unload after bounded cancellation.
@@ -74,5 +76,7 @@ git diff --check
 `make check` verifies required documents, descriptor assertions as text, the
 status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`, and
-`watchdog-smoke`. Descriptor layout checks remain textual until the generated
-command ABI and compiled raw-byte tests are introduced with the host path.
+`watchdog-smoke`. PCI validation uses `pcie-smoke` and `kernel-smoke`; the latter
+boots a disposable Linux initramfs and exercises real module binding and MSI-X.
+Descriptor layout checks remain textual until the generated command ABI and
+compiled raw-byte tests are introduced with the host path.

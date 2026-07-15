@@ -32,6 +32,11 @@ management components privately within `vams-pcie`, not expose a second guest
 machine. The development identity is provisional and is not an allocated
 production ID.
 
+The implemented `vams_pci` driver validates the endpoint identity and interface,
+negotiates a coherent DMA mask, owns BAR0, installs both MSI-X handlers, and
+binds in discovery mode. It enables PCI bus mastering for MSI-X messages but
+does not allocate queues or permit payload DMA while capability bit 0 is clear.
+
 ## Address spaces
 
 Host BAR0 is one 4 KiB non-prefetchable register BAR. A later optional BAR2 may
@@ -59,7 +64,7 @@ retains reset-cause telemetry. Secure boot is out of scope.
 ## Host stack and queues
 
 `libvams` provides typed allocation, submission, waiting, and telemetry APIs.
-`vamsctl` and the benchmark use it. The thin `vams_pci` driver owns PCI enable,
+`vamsctl` and the benchmark will use it. The thin `vams_pci` driver owns PCI enable,
 64-bit DMA mask negotiation, coherent ring allocation, payload mapping, MSI-X,
 backpressure, reset serialization, and process cleanup. It does not validate
 opcode-specific policy or schedule commands.

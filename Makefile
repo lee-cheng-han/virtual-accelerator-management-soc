@@ -9,11 +9,16 @@ SPEC_DOCS := README.md \
 	docs/command-lifecycle.md docs/fault-recovery.md \
 	docs/verification-plan.md docs/performance-plan.md docs/demo.md \
 	docs/minimal-riscv-subsystem.md docs/zephyr-board-port.md \
-	docs/management-peripherals.md docs/pcie-endpoint.md
+	docs/management-peripherals.md docs/pcie-endpoint.md \
+	docs/linux-pci-driver.md
 
 CROSS_COMPILE ?= riscv64-unknown-elf-
 QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
 QEMU_SYSTEM_X86_64 ?= qemu-system-x86_64
+KERNEL_BUILD ?= /lib/modules/$(shell uname -r)/build
+VAMS_LINUX_IMAGE ?=
+VAMS_PCI_MODULE ?= $(CURDIR)/kernel/vams_pci.ko
+BUSYBOX ?= busybox
 VAMS_FIRMWARE ?= $(CURDIR)/build/firmware/baremetal/vams-riscv-fw.elf
 ZEPHYR_BASE ?= $(CURDIR)/build/zephyrproject/zephyr
 ZEPHYR_VENV ?= $(CURDIR)/build/zephyr-venv
@@ -24,7 +29,8 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 
 .PHONY: help check check-docs firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
-	watchdog-smoke pcie-smoke qemu-patch-check tree clean demo
+	watchdog-smoke pcie-smoke kernel kernel-test-build kernel-smoke \
+	qemu-patch-check tree clean demo
 
 help:
 	@printf '%s\n' \
@@ -45,6 +51,8 @@ help:
 	  '  make watchdog-smoke' \
 	  '                   Verify watchdog reset and firmware recovery' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
+	  '  make kernel       Build the production vams_pci kernel module' \
+	  '  make kernel-smoke Build and test probe, MSI-X, and cleanup in a guest' \
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
 	  '                   Check that the QEMU patch series applies cleanly' \
 	  '  make tree        Print the repository tree' \
@@ -61,7 +69,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Management control plane and QEMU PCIe shell implemented' README.md; \
+	grep -q 'PCIe endpoint and Linux discovery driver implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -140,6 +148,19 @@ pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
 
+kernel:
+	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)"
+
+kernel-test-build:
+	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)" VAMS_TESTING=1
+
+kernel-smoke: kernel-test-build
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	VAMS_LINUX_IMAGE="$(VAMS_LINUX_IMAGE)" \
+	VAMS_PCI_MODULE="$(VAMS_PCI_MODULE)" \
+	BUSYBOX="$(BUSYBOX)" \
+	./kernel/tests/smoke-vams-pci.sh
+
 qemu-patch-check:
 	@test -n "$(QEMU_SRC)" || { \
 		echo 'usage: make qemu-patch-check QEMU_SRC=/path/to/qemu' >&2; \
@@ -168,4 +189,5 @@ demo:
 	@echo 'The full PCIe accelerator demo is not implemented; see docs/demo.md'
 
 clean:
+	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)" clean
 	rm -rf build out test-results coverage

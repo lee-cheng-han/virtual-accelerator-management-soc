@@ -91,5 +91,7 @@ The QTest smoke uses a Q35 PCIe root bus and verifies:
 - asynchronous RESETTING → READY behavior, generation increment, and
   RESET_DONE publication.
 
-The Linux `vams_pci` probe/remove driver and guest enumeration test remain the
-next work required to complete the PCI endpoint acceptance gate.
+The Linux `vams_pci` driver now validates this contract, installs both MSI-X
+handlers, and is exercised by a disposable-guest probe/failure/remove test. See
+the [Linux PCI driver guide](linux-pci-driver.md). Queue and DMA registers remain
+the next endpoint expansion.

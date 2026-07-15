@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VAMS_PCI
+	tristate "Virtual Accelerator Management Subsystem PCIe support"
+	depends on PCI && PCI_MSI
+	help
+	  Build the thin host discovery and interrupt driver for the VAMS QEMU
+	  PCIe endpoint. Queue and command transport support is added separately
+	  when the endpoint advertises the DMA capability. The driver validates
+	  BAR0 identity and ABI versions, negotiates a DMA mask, and installs the
+	  two required MSI-X interrupt handlers.
+
+config VAMS_PCI_TESTING
+	bool "VAMS PCI probe fault-injection controls"
+	depends on VAMS_PCI
+	help
+	  Add module parameters that inject failures after each probe resource
+	  acquisition and exercise both MSI-X paths. This is intended only for
+	  disposable test guests. Production builds omit the parameters and their
+	  interrupt-forcing behavior. Enable this only in an isolated QEMU guest
+	  used by the integration test.

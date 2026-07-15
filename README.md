@@ -6,11 +6,12 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Management control plane and QEMU PCIe shell implemented.** The
+> Status: **PCIe endpoint and Linux discovery driver implemented.** The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, and telemetry. The host-facing `vams-pcie` endpoint now
-> enumerates with BAR0 and two MSI-X vectors. DMA queues, the kernel driver, and
-> the full demo remain planned.
+> enumerates with BAR0 and two MSI-X vectors, while `vams_pci.ko` validates and
+> binds it with tested cleanup paths. DMA queues and the full demo remain
+> planned.
 
 ## Architecture
 
@@ -56,6 +57,9 @@ internal management peripheral, not the host datapath.
 - QTest MMIO, mailbox, and forced-watchdog-reset regressions
 - QEMU `vams-pcie` processing-accelerator endpoint with BAR0 and two MSI-X vectors
 - PCI enumeration, MMIO error, MSI-X pending, and asynchronous-reset QTest
+- Thin `vams_pci` discovery driver with ABI validation and 64/32-bit DMA-mask negotiation
+- Two-vector MSI-X handling with reverse-order probe/remove cleanup
+- Disposable Linux guest test covering seven injected probe failures, both IRQs, and rebinding
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -100,11 +104,17 @@ make watchdog-smoke \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make kernel KERNEL_BUILD=/path/to/linux/build
+make kernel-smoke \
+  KERNEL_BUILD=/path/to/linux/build \
+  VAMS_LINUX_IMAGE=/path/to/matching/bzImage \
+  BUSYBOX=/path/to/static/busybox \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
 `make demo` reports that the full PCIe accelerator demo is not implemented.
-Future dependencies include the Zephyr SDK/west and Linux kernel headers; exact
-supported versions will be pinned when those components are introduced.
+The kernel smoke test builds a temporary initramfs and needs matching Linux
+headers/image plus static BusyBox; it does not require a disk image.
 
 ## Specification map
 
@@ -126,6 +136,7 @@ supported versions will be pinned when those components are introduced.
 | [Zephyr board port](docs/zephyr-board-port.md) | RTOS board, timer, task IPC, and validation |
 | [Management peripherals](docs/management-peripherals.md) | Mailbox, watchdog, reset, telemetry, and tests |
 | [PCIe endpoint](docs/pcie-endpoint.md) | PCI identity, BAR0, MSI-X, reset, and QTest contract |
+| [Linux PCI driver](docs/linux-pci-driver.md) | Probe/remove, ABI validation, IRQs, cleanup, and guest test |
 
 ## Planned repository areas
 
@@ -139,8 +150,9 @@ scaffolding and gain tracked files only when their components are built.
 
 - The RISC-V management subsystem and PCIe endpoint shell are executable, but
   they are not connected into one private device instance yet.
-- The endpoint advertises only MSI-X. Queue, DMA, engine, firmware, telemetry,
-  and debug capabilities remain clear until their host-facing paths work.
+- The endpoint advertises only MSI-X. The Linux driver binds in discovery mode;
+  queue, DMA, engine, firmware, telemetry, and debug capabilities remain clear
+  until their host-facing paths work.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is
@@ -150,4 +162,5 @@ scaffolding and gain tracked files only when their components are built.
 
 ## License
 
-VAMS is available under the MIT License; see [LICENSE](LICENSE).
+VAMS is available under the MIT License; see [LICENSE](LICENSE). Linux kernel
+module sources under `kernel/` are GPL-2.0-only for kernel compatibility.
