@@ -68,8 +68,9 @@ retains reset-cause telemetry. Secure boot is out of scope.
 
 ## Host stack and queues
 
-`libvams` provides typed allocation, submission, waiting, and telemetry APIs.
-`vamsctl` and the benchmark will use it. The thin `vams_pci` driver owns PCI enable,
+The initial `/dev/vamsN` API provides versioned device information and tracked
+synchronous NOP submission. `libvams`, `vamsctl`, and the benchmark will build
+on it as payload ownership is implemented. The thin `vams_pci` driver owns PCI enable,
 64-bit DMA mask negotiation, coherent ring allocation, payload mapping, MSI-X,
 backpressure, reset serialization, and process cleanup. It does not validate
 opcode-specific policy or schedule commands.

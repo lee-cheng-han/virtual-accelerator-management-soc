@@ -22,10 +22,11 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 Current gate: command transport is in progress. In addition to coherent PCI
 SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
-validates, and completes valid and unsupported-version NOPs. The gate remains
-open until PCI queue events and DMA staging use that firmware portal, driver
-request tracking/polling exists, and the public host API completes an ID/cookie
-round trip.
+validates, and completes valid and unsupported-version NOPs. The Linux driver
+now tracks concurrent requests, polls CQ as an interrupt fallback, and exposes
+a versioned host API with tested ID/cookie round trips. The gate remains open
+until PCI queue events and DMA staging use the firmware portal and the reference
+queue/property model covers ownership and reset sequences.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a

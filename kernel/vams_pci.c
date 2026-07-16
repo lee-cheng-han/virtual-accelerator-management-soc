@@ -1,26 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Thin Linux queue and interrupt driver for the VAMS PCIe endpoint.
- * Public command submission remains deferred until request tracking exists.
+ * Thin Linux queue, interrupt, and host-API driver for the VAMS PCIe endpoint.
+ * Payload DMA and asynchronous userspace submission remain deferred.
  */
 
 #include <linux/completion.h>
+#include <linux/compat.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/fs.h>
+#include <linux/idr.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/kref.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/workqueue.h>
+#include <linux/xarray.h>
 
+#include "include/uapi/linux/vams.h"
 #include "vams_abi.h"
 #include "vams_regs.h"
 
 #define VAMS_DRIVER_NAME "vams_pci"
 #define VAMS_PCI_VENDOR_ID 0x1b36
 #define VAMS_PCI_DEVICE_ID 0x1100
+#define VAMS_CQ_POLL_INTERVAL_MS 10U
+#define VAMS_NOP_WAIT_MS 1000U
 
 static_assert(sizeof(struct vams_submission) == VAMS_SUBMISSION_SIZE);
 static_assert(sizeof(struct vams_completion) == VAMS_COMPLETION_SIZE);
+static_assert(sizeof(struct vams_ioc_info) == 32);
+static_assert(sizeof(struct vams_ioc_nop) == 56);
+
+static DEFINE_IDA(vams_instance_ida);
 
 enum vams_probe_step {
 	VAMS_PROBE_AFTER_ENABLE = 1,
@@ -31,6 +49,15 @@ enum vams_probe_step {
 	VAMS_PROBE_AFTER_VECTORS,
 	VAMS_PROBE_AFTER_CQ_IRQ,
 	VAMS_PROBE_AFTER_ASYNC_IRQ,
+	VAMS_PROBE_AFTER_CHARDEV,
+};
+
+struct vams_request {
+	struct completion done;
+	refcount_t refs;
+	struct vams_completion result;
+	int driver_status;
+	u32 command_id;
 };
 
 struct vams_device {
@@ -47,8 +74,18 @@ struct vams_device {
 	u32 sq_tail;
 	u32 cq_head;
 	bool queues_ready;
+	bool removing;
+	struct mutex submit_lock;
 	/* Serializes CQ consumption between IRQ and future polling paths. */
 	spinlock_t cq_lock;
+	struct xarray requests;
+	atomic_t next_command_id;
+	atomic_t pending_requests;
+	struct delayed_work cq_poll_work;
+	struct miscdevice miscdev;
+	struct kref refs;
+	char *misc_name;
+	int instance;
 	atomic64_t cq_interrupts;
 	atomic64_t async_interrupts;
 #ifdef CONFIG_VAMS_PCI_TESTING
@@ -65,7 +102,7 @@ struct vams_device {
 static unsigned int probe_fail_step;
 module_param(probe_fail_step, uint, 0400);
 MODULE_PARM_DESC(probe_fail_step,
-		 "test only: fail probe after resource acquisition step 1 through 8");
+		 "test only: fail probe after resource acquisition step 1 through 9");
 
 static bool probe_irq_selftest;
 module_param(probe_irq_selftest, bool, 0400);
@@ -76,6 +113,11 @@ static bool probe_nop_selftest;
 module_param(probe_nop_selftest, bool, 0400);
 MODULE_PARM_DESC(probe_nop_selftest,
 		 "test only: submit and verify one NOP command during probe");
+
+static bool probe_poll_selftest;
+module_param(probe_poll_selftest, bool, 0400);
+MODULE_PARM_DESC(probe_poll_selftest,
+		 "test only: verify completion polling with CQ interrupts masked");
 
 static int vams_maybe_fail_probe(struct vams_device *vdev,
 				 enum vams_probe_step step)
@@ -157,6 +199,48 @@ static void vams_free_queues(struct vams_device *vdev)
 	vdev->sq = NULL;
 }
 
+static struct vams_request *vams_request_alloc(void)
+{
+	struct vams_request *request;
+
+	request = kzalloc_obj(struct vams_request);
+	if (!request)
+		return NULL;
+
+	init_completion(&request->done);
+	refcount_set(&request->refs, 1);
+	return request;
+}
+
+static void vams_request_get(struct vams_request *request)
+{
+	refcount_inc(&request->refs);
+}
+
+static void vams_request_put(struct vams_request *request)
+{
+	if (refcount_dec_and_test(&request->refs))
+		kfree(request);
+}
+
+static bool vams_finish_request(struct vams_device *vdev,
+				const struct vams_completion *completion)
+{
+	struct vams_request *request;
+	u32 command_id = le32_to_cpu(completion->command_id);
+
+	request = xa_erase(&vdev->requests, command_id);
+	if (!request)
+		return false;
+
+	request->result = *completion;
+	request->driver_status = 0;
+	complete(&request->done);
+	atomic_dec(&vdev->pending_requests);
+	vams_request_put(request);
+	return true;
+}
+
 static unsigned int vams_drain_cq(struct vams_device *vdev)
 {
 	unsigned int drained = 0;
@@ -192,6 +276,8 @@ static unsigned int vams_drain_cq(struct vams_device *vdev)
 			continue;
 		}
 #endif
+		if (vams_finish_request(vdev, &completion))
+			continue;
 		dev_warn_ratelimited(&vdev->pdev->dev,
 				     "unexpected completion id %#x\n",
 				     le32_to_cpu(completion.command_id));
@@ -203,6 +289,37 @@ static unsigned int vams_drain_cq(struct vams_device *vdev)
 	}
 	spin_unlock(&vdev->cq_lock);
 	return drained;
+}
+
+static void vams_cq_poll_work(struct work_struct *work)
+{
+	struct vams_device *vdev =
+		container_of(to_delayed_work(work), struct vams_device,
+			     cq_poll_work);
+
+	if (READ_ONCE(vdev->removing))
+		return;
+
+	vams_drain_cq(vdev);
+	if (atomic_read(&vdev->pending_requests) > 0)
+		schedule_delayed_work(&vdev->cq_poll_work,
+				      msecs_to_jiffies(VAMS_CQ_POLL_INTERVAL_MS));
+}
+
+static void vams_cancel_requests(struct vams_device *vdev, int status)
+{
+	struct vams_request *request;
+	unsigned long command_id;
+
+	xa_for_each(&vdev->requests, command_id, request) {
+		request = xa_erase(&vdev->requests, command_id);
+		if (!request)
+			continue;
+		request->driver_status = status;
+		complete(&request->done);
+		atomic_dec(&vdev->pending_requests);
+		vams_request_put(request);
+	}
 }
 
 static void vams_disable_queues(struct vams_device *vdev);
@@ -370,6 +487,259 @@ static int vams_set_dma_mask(struct vams_device *vdev)
 	return 0;
 }
 
+static int vams_track_request(struct vams_device *vdev,
+			      struct vams_request *request)
+{
+	unsigned int attempt;
+	int ret;
+
+	for (attempt = 0; attempt < VAMS_QUEUE_DEPTH * 2; attempt++) {
+		u32 command_id = (u32)atomic_inc_return(&vdev->next_command_id);
+
+		if (!command_id)
+			continue;
+		request->command_id = command_id;
+		vams_request_get(request);
+		ret = xa_insert(&vdev->requests, command_id, request, GFP_KERNEL);
+		if (!ret)
+			return 0;
+		vams_request_put(request);
+		if (ret != -EBUSY)
+			return ret;
+	}
+
+	return -ENOSPC;
+}
+
+static int vams_submit_nop(struct vams_device *vdev,
+			   struct vams_request *request, u64 user_cookie,
+			   u32 timeout_ms)
+{
+	struct vams_submission *submission;
+	u32 next_tail;
+	u32 sq_head;
+	int ret;
+
+	mutex_lock(&vdev->submit_lock);
+	if (vdev->removing) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+	if (!vdev->queues_ready) {
+		ret = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+	vams_drain_cq(vdev);
+
+	sq_head = vams_readl(vdev, VAMS_REG_SQ_HEAD);
+	if (sq_head >= VAMS_QUEUE_DEPTH) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	next_tail = (vdev->sq_tail + 1) & (VAMS_QUEUE_DEPTH - 1);
+	if (next_tail == sq_head) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
+
+	ret = vams_track_request(vdev, request);
+	if (ret)
+		goto out_unlock;
+
+	submission = &vdev->sq[vdev->sq_tail];
+	memset(submission, 0, sizeof(*submission));
+	submission->version = cpu_to_le16(VAMS_DESC_VERSION_1);
+	submission->opcode = VAMS_OP_NOP;
+	submission->command_id = cpu_to_le32(request->command_id);
+	submission->timeout_ms = cpu_to_le32(timeout_ms);
+	submission->user_cookie = cpu_to_le64(user_cookie);
+	atomic_inc(&vdev->pending_requests);
+	dma_wmb();
+	vdev->sq_tail = next_tail;
+	vams_writel(vdev, VAMS_REG_SQ_DOORBELL, vdev->sq_tail);
+	if (atomic_read(&vdev->pending_requests) > 0)
+		schedule_delayed_work(&vdev->cq_poll_work,
+				      msecs_to_jiffies(VAMS_CQ_POLL_INTERVAL_MS));
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&vdev->submit_lock);
+	return ret;
+}
+
+static void vams_device_release(struct kref *refs)
+{
+	struct vams_device *vdev =
+		container_of(refs, struct vams_device, refs);
+
+	xa_destroy(&vdev->requests);
+	if (vdev->instance >= 0)
+		ida_free(&vams_instance_ida, vdev->instance);
+	kfree(vdev->misc_name);
+	kfree(vdev);
+}
+
+static int vams_open(struct inode *inode, struct file *file)
+{
+	struct miscdevice *miscdev = file->private_data;
+	struct vams_device *vdev =
+		container_of(miscdev, struct vams_device, miscdev);
+	int ret = 0;
+
+	mutex_lock(&vdev->submit_lock);
+	if (vdev->removing) {
+		ret = -ENODEV;
+	} else {
+		kref_get(&vdev->refs);
+		file->private_data = vdev;
+	}
+	mutex_unlock(&vdev->submit_lock);
+	return ret;
+}
+
+static int vams_release(struct inode *inode, struct file *file)
+{
+	struct vams_device *vdev = file->private_data;
+
+	kref_put(&vdev->refs, vams_device_release);
+	return 0;
+}
+
+static long vams_ioctl_info(struct vams_device *vdev, void __user *argp)
+{
+	struct vams_ioc_info info;
+
+	if (copy_from_user(&info, argp, sizeof(info)))
+		return -EFAULT;
+	if (info.size != sizeof(info) || info.version != VAMS_UAPI_VERSION ||
+	    info.reserved)
+		return -EINVAL;
+
+	mutex_lock(&vdev->submit_lock);
+	if (vdev->removing) {
+		mutex_unlock(&vdev->submit_lock);
+		return -ENODEV;
+	}
+	info.hw_if_version = vdev->hw_if_version;
+	info.fw_version = vdev->fw_version;
+	info.capabilities = vdev->capabilities & VAMS_CAP_KNOWN;
+	info.queue_depth = vdev->queues_ready ? VAMS_QUEUE_DEPTH : 0;
+	info.reset_generation = vdev->reset_generation;
+	mutex_unlock(&vdev->submit_lock);
+
+	if (copy_to_user(argp, &info, sizeof(info)))
+		return -EFAULT;
+	return 0;
+}
+
+static long vams_ioctl_nop(struct vams_device *vdev, void __user *argp)
+{
+	struct vams_request *request;
+	struct vams_ioc_nop nop;
+	long waited;
+	int ret;
+
+	if (copy_from_user(&nop, argp, sizeof(nop)))
+		return -EFAULT;
+	if (nop.size != sizeof(nop) || nop.version != VAMS_UAPI_VERSION ||
+	    nop.flags || nop.reserved || nop.timeout_ms > 60000U)
+		return -EINVAL;
+
+	request = vams_request_alloc();
+	if (!request)
+		return -ENOMEM;
+	ret = vams_submit_nop(vdev, request, nop.user_cookie, nop.timeout_ms);
+	if (ret)
+		goto out_put;
+
+	waited = wait_for_completion_interruptible_timeout(
+		&request->done, msecs_to_jiffies(VAMS_NOP_WAIT_MS));
+	if (waited < 0) {
+		ret = waited;
+		goto out_put;
+	}
+	if (!waited) {
+		ret = -ETIMEDOUT;
+		goto out_put;
+	}
+	if (request->driver_status) {
+		ret = request->driver_status;
+		goto out_put;
+	}
+
+	nop.command_id = request->command_id;
+	nop.status = le16_to_cpu(request->result.status);
+	nop.error_code = le16_to_cpu(request->result.error_code);
+	nop.bytes_processed = le32_to_cpu(request->result.bytes_processed);
+	nop.result_crc = le32_to_cpu(request->result.result_crc);
+	nop.device_timestamp =
+		le64_to_cpu(request->result.device_timestamp);
+	if (copy_to_user(argp, &nop, sizeof(nop))) {
+		ret = -EFAULT;
+		goto out_put;
+	}
+	ret = 0;
+
+out_put:
+	vams_request_put(request);
+	return ret;
+}
+
+static long vams_ioctl(struct file *file, unsigned int command,
+		       unsigned long argument)
+{
+	struct vams_device *vdev = file->private_data;
+	void __user *argp = (void __user *)argument;
+
+	switch (command) {
+	case VAMS_IOCTL_GET_INFO:
+		return vams_ioctl_info(vdev, argp);
+	case VAMS_IOCTL_NOP:
+		return vams_ioctl_nop(vdev, argp);
+	default:
+		return -ENOTTY;
+	}
+}
+
+static const struct file_operations vams_fops = {
+	.owner = THIS_MODULE,
+	.open = vams_open,
+	.release = vams_release,
+	.unlocked_ioctl = vams_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
+};
+
+static int vams_register_chardev(struct vams_device *vdev)
+{
+	int ret;
+
+	vdev->instance = ida_alloc(&vams_instance_ida, GFP_KERNEL);
+	if (vdev->instance < 0)
+		return vdev->instance;
+	vdev->misc_name = kasprintf(GFP_KERNEL, "vams%d", vdev->instance);
+	if (!vdev->misc_name) {
+		ret = -ENOMEM;
+		goto err_free_instance;
+	}
+
+	vdev->miscdev.minor = MISC_DYNAMIC_MINOR;
+	vdev->miscdev.name = vdev->misc_name;
+	vdev->miscdev.fops = &vams_fops;
+	vdev->miscdev.parent = &vdev->pdev->dev;
+	ret = misc_register(&vdev->miscdev);
+	if (ret)
+		goto err_free_name;
+	return 0;
+
+err_free_name:
+	kfree(vdev->misc_name);
+	vdev->misc_name = NULL;
+err_free_instance:
+	ida_free(&vams_instance_ida, vdev->instance);
+	vdev->instance = -1;
+	return ret;
+}
+
 #ifdef CONFIG_VAMS_PCI_TESTING
 static int vams_irq_selftest(struct vams_device *vdev)
 {
@@ -446,6 +816,47 @@ static int vams_nop_selftest(struct vams_device *vdev)
 		 command_id, cookie);
 	return 0;
 }
+
+static int vams_poll_selftest(struct vams_device *vdev)
+{
+	static const u64 cookie = 0x504f4c4c5f4e4f50ULL;
+	struct vams_request *request;
+	unsigned long timeout;
+	int ret;
+
+	if (!probe_poll_selftest)
+		return 0;
+	request = vams_request_alloc();
+	if (!request)
+		return -ENOMEM;
+
+	vams_writel(vdev, VAMS_REG_INTR_MASK, VAMS_INTR_CQ);
+	vams_readl(vdev, VAMS_REG_INTR_MASK);
+	ret = vams_submit_nop(vdev, request, cookie, 0);
+	if (ret)
+		goto out_unmask;
+	timeout = wait_for_completion_timeout(&request->done, HZ);
+	if (!timeout) {
+		ret = -ETIMEDOUT;
+		goto out_unmask;
+	}
+	ret = request->driver_status;
+	if (!ret &&
+	    (le16_to_cpu(request->result.status) != VAMS_STATUS_SUCCESS ||
+	     le16_to_cpu(request->result.error_code) != VAMS_ERR_NONE ||
+	     le64_to_cpu(request->result.user_cookie) != cookie))
+		ret = -EPROTO;
+	if (!ret)
+		dev_info(&vdev->pdev->dev,
+			 "CQ polling fallback self-test passed\n");
+
+out_unmask:
+	vams_writel(vdev, VAMS_REG_INTR_STATUS, VAMS_INTR_CQ);
+	vams_writel(vdev, VAMS_REG_INTR_MASK, 0);
+	vams_readl(vdev, VAMS_REG_INTR_MASK);
+	vams_request_put(request);
+	return ret;
+}
 #else
 static int vams_irq_selftest(struct vams_device *vdev)
 {
@@ -453,6 +864,11 @@ static int vams_irq_selftest(struct vams_device *vdev)
 }
 
 static int vams_nop_selftest(struct vams_device *vdev)
+{
+	return 0;
+}
+
+static int vams_poll_selftest(struct vams_device *vdev)
 {
 	return 0;
 }
@@ -469,7 +885,14 @@ static int vams_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -ENOMEM;
 
 	vdev->pdev = pdev;
+	vdev->instance = -1;
+	kref_init(&vdev->refs);
+	mutex_init(&vdev->submit_lock);
 	spin_lock_init(&vdev->cq_lock);
+	xa_init_flags(&vdev->requests, XA_FLAGS_LOCK_IRQ);
+	atomic_set(&vdev->next_command_id, 0);
+	atomic_set(&vdev->pending_requests, 0);
+	INIT_DELAYED_WORK(&vdev->cq_poll_work, vams_cq_poll_work);
 	atomic64_set(&vdev->cq_interrupts, 0);
 	atomic64_set(&vdev->async_interrupts, 0);
 #ifdef CONFIG_VAMS_PCI_TESTING
@@ -589,6 +1012,17 @@ static int vams_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = vams_nop_selftest(vdev);
 	if (ret)
 		goto err_clear_master;
+	ret = vams_poll_selftest(vdev);
+	if (ret)
+		goto err_clear_master;
+	ret = vams_register_chardev(vdev);
+	if (ret) {
+		dev_err(dev, "character device registration failed\n");
+		goto err_clear_master;
+	}
+	ret = vams_maybe_fail_probe(vdev, VAMS_PROBE_AFTER_CHARDEV);
+	if (ret)
+		goto err_deregister_misc;
 
 	dev_info(dev,
 		 "ready: hw_if=%u.%u fw=%#x caps=%#x dma=%u-bit generation=%u\n",
@@ -601,9 +1035,17 @@ static int vams_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	else
 		dev_info(dev, "coherent SQ/CQ ready: depth=%u\n",
 			 VAMS_QUEUE_DEPTH);
+	dev_info(dev, "host API ready: /dev/%s version=%u\n",
+		 vdev->misc_name, VAMS_UAPI_VERSION);
 
 	return 0;
 
+err_deregister_misc:
+	mutex_lock(&vdev->submit_lock);
+	vdev->removing = true;
+	mutex_unlock(&vdev->submit_lock);
+	misc_deregister(&vdev->miscdev);
+	cancel_delayed_work_sync(&vdev->cq_poll_work);
 err_clear_master:
 	vams_mask_interrupts(vdev);
 	vams_disable_queues(vdev);
@@ -613,6 +1055,7 @@ err_free_async_irq:
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_ASYNC_VECTOR), vdev);
 err_free_cq_irq:
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_CQ_VECTOR), vdev);
+	vams_cancel_requests(vdev, -ENODEV);
 err_free_vectors:
 	pci_free_irq_vectors(pdev);
 err_free_queues:
@@ -624,7 +1067,7 @@ err_release_region:
 err_disable_device:
 	pci_disable_device(pdev);
 err_free_device:
-	kfree(vdev);
+	kref_put(&vdev->refs, vams_device_release);
 	return ret;
 }
 
@@ -632,19 +1075,25 @@ static void vams_remove(struct pci_dev *pdev)
 {
 	struct vams_device *vdev = pci_get_drvdata(pdev);
 
+	mutex_lock(&vdev->submit_lock);
+	vdev->removing = true;
+	mutex_unlock(&vdev->submit_lock);
+	misc_deregister(&vdev->miscdev);
+	cancel_delayed_work_sync(&vdev->cq_poll_work);
 	vams_mask_interrupts(vdev);
 	vams_writel(vdev, VAMS_REG_INTR_STATUS, VAMS_INTR_ALL);
 	vams_disable_queues(vdev);
 	pci_clear_master(pdev);
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_ASYNC_VECTOR), vdev);
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_CQ_VECTOR), vdev);
+	vams_cancel_requests(vdev, -ENODEV);
 	pci_free_irq_vectors(pdev);
 	vams_free_queues(vdev);
 	pci_iounmap(pdev, vdev->bar0);
 	pci_release_region(pdev, 0);
 	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
-	kfree(vdev);
+	kref_put(&vdev->refs, vams_device_release);
 }
 
 static const struct pci_device_id vams_pci_ids[] = {

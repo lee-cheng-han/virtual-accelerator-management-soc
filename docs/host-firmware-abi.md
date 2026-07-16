@@ -96,10 +96,9 @@ retry after receiving an explicit reset result and reestablishing buffers.
 ## Compatibility
 
 The HW interface version governs BAR0; the descriptor version governs ring
-entries; the Linux UAPI will have its own structure-size/version fields. Hosts
+entries; Linux UAPI version 1 has independent structure-size/version fields. Hosts
 ignore unknown capability bits and reserved RO register bits, but never write
 unknown bits. Major interface mismatch fails safely. Minor additions must keep
 existing offsets and semantics. Queue memory is not migration-stable in release
 1; QEMU migration is permitted only while the function is quiesced with no
 accepted commands, otherwise migration must fail visibly.
-

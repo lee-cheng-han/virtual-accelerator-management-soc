@@ -26,7 +26,7 @@ documentation checks only. Planned tests are not reported as passing.
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |
 | FLT-01 | one-shot trigger, expected evidence, clean NOP after every fault |
-| LNX-01 | PCI and coherent-ring probe resources have forced cleanup tests; public request/concurrent lifetime cases remain |
+| LNX-01 | nine forced probe cleanup points, tracked IRQ/poll completion, version rejection, and 32 concurrent guest NOP ioctls; payload/reset lifetime cases remain |
 
 ## Required cases
 
@@ -45,7 +45,8 @@ all output bytes; failed commands treat destination as unspecified but verify no
 out-of-range access using guard pages/canaries.
 
 Current driver tests force failure after PCI enable, BAR reservation/map, DMA
-mask negotiation, vector allocation, and each IRQ registration, followed by a
+mask negotiation, ring allocation, vector allocation, each IRQ registration,
+and character-device registration, followed by a
 successful bind/remove/rebind cycle. Queue driver tests will add forced ring
 allocation failure; cleanup must remain leak-free. They cover blocking and
 nonblocking backpressure, close with requests outstanding, unknown/duplicate
@@ -78,5 +79,6 @@ status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`,
 `command-portal-smoke`, `firmware-command-smoke`, and `watchdog-smoke`. PCI validation uses `pcie-smoke`, `nop-smoke`, and
 `kernel-smoke`; the latter boots a disposable Linux initramfs and exercises
-coherent queues, a real NOP completion interrupt, module binding, and cleanup.
+coherent queues, interrupt and polling completion, version rejection, 32
+concurrent NOP ioctls, module binding, and cleanup.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.

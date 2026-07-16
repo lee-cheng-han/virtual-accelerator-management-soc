@@ -56,7 +56,8 @@ The Linux test-only `probe_nop_selftest=1` path submits command ID `0x56414d53`,
 waits at most one second for the real CQ interrupt, and checks ID, cookie,
 status, error, and bytes processed. It is compiled out of the production
 module. The production module configures and owns the queues but exposes no
-submission interface until request tracking and reset cancellation exist.
+payload interface. Its versioned `/dev/vamsN` API tracks synchronous NOP
+requests; reset control and payload-buffer ownership remain deferred.
 
 ## Reset and limitations
 
@@ -69,7 +70,8 @@ end-to-end migration with coherent guest memory remains unsupported.
 The private portal uses explicit host-submit, firmware-ack, firmware-complete,
 and host-ack ownership transitions. Its QTest covers overwrite rejection,
 sticky overflow/protocol errors, counters, and exact completion bytes; a Zephyr
-test covers valid and unsupported-version NOPs. The next work is to connect PCI
-queue events and DMA service to this portal, then add driver request tracking,
-polling fallback, and a versioned host API. Until then, the two sides are tested
-foundations rather than one firmware-owned PCI command plane.
+test covers valid and unsupported-version NOPs. The Linux driver now adds
+tracked concurrent NOPs, CQ polling fallback, and a versioned host API. The next
+work is to connect PCI queue events and DMA service to the firmware portal.
+Until then, the two sides are tested foundations rather than one firmware-owned
+PCI command plane.

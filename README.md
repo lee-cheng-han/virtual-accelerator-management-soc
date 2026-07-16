@@ -59,13 +59,15 @@ internal management peripheral, not the host datapath.
 - PCI enumeration, MMIO error, MSI-X pending, and asynchronous-reset QTest
 - Thin `vams_pci` queue driver with ABI validation and 64/32-bit DMA-mask negotiation
 - Two-vector MSI-X handling with reverse-order probe/remove cleanup
-- Disposable Linux guest test covering eight injected probe failures, both IRQs, and rebinding
+- Disposable Linux guest test covering nine injected probe failures, both IRQs, and rebinding
 - Authoritative JSON v1 ABI with generated portable, QEMU, and kernel headers
 - Generated firmware ABI plus a private descriptor/completion ownership portal
 - Zephyr-owned valid and unsupported-version NOP completions
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
+- Versioned `/dev/vamsN` UAPI with tracked concurrent NOP requests
+- Lost-interrupt CQ polling fallback and bounded request cancellation
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -152,6 +154,7 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [Management peripherals](docs/management-peripherals.md) | Mailbox, watchdog, reset, telemetry, and tests |
 | [PCIe endpoint](docs/pcie-endpoint.md) | PCI identity, BAR0, MSI-X, reset, and QTest contract |
 | [Linux PCI driver](docs/linux-pci-driver.md) | Probe/remove, ABI validation, IRQs, cleanup, and guest test |
+| [Linux UAPI](docs/linux-uapi.md) | Versioning, device info, synchronous NOP, and lifetime rules |
 | [NOP command path](docs/nop-command-path.md) | Generated ABI, coherent rings, ordering, NOP, and limitations |
 
 ## Planned repository areas
@@ -172,6 +175,8 @@ scaffolding and gain tracked files only when their components are built.
 - Zephyr owns NOP validation in the standalone management harness, but the PCI
   queue still uses its QEMU reference validator until the private portal is
   embedded and connected to PCI DMA.
+- The public host API currently exposes device information and synchronous NOP;
+  payload mapping and asynchronous userspace submission remain future work.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

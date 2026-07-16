@@ -12,12 +12,15 @@ SPEC_DOCS := README.md \
 	docs/management-peripherals.md docs/pcie-endpoint.md \
 	docs/linux-pci-driver.md docs/nop-command-path.md
 
+SPEC_DOCS += docs/linux-uapi.md
+
 CROSS_COMPILE ?= riscv64-unknown-elf-
 QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
 QEMU_SYSTEM_X86_64 ?= qemu-system-x86_64
 KERNEL_BUILD ?= /lib/modules/$(shell uname -r)/build
 VAMS_LINUX_IMAGE ?=
 VAMS_PCI_MODULE ?= $(CURDIR)/kernel/vams_pci.ko
+VAMS_UAPI_TEST ?= $(CURDIR)/build/kernel/vams-uapi-test
 BUSYBOX ?= busybox
 HOST_CC ?= gcc
 HOST_CLANG ?= clang
@@ -32,7 +35,7 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
-	pcie-smoke nop-smoke kernel kernel-test-build kernel-smoke \
+	pcie-smoke nop-smoke kernel kernel-test-build kernel-uapi-test kernel-smoke \
 	qemu-patch-check tree clean demo
 
 help:
@@ -61,6 +64,8 @@ help:
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make abi-check    Regenerate-check and compile-test the v1 ABI' \
 	  '  make kernel       Build the production vams_pci kernel module' \
+	  '  make kernel-uapi-test' \
+	  '                   Build the static VAMS host-API integration client' \
 	  '  make kernel-smoke Build and test probe, MSI-X, and cleanup in a guest' \
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
 	  '                   Check that the QEMU patch series applies cleanly' \
@@ -188,10 +193,17 @@ kernel:
 kernel-test-build:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)" VAMS_TESTING=1
 
-kernel-smoke: kernel-test-build
+kernel-uapi-test:
+	@mkdir -p "$(dir $(VAMS_UAPI_TEST))"
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -static -pthread \
+		-Ikernel/include/uapi kernel/tests/vams-uapi-test.c \
+		-o "$(VAMS_UAPI_TEST)"
+
+kernel-smoke: kernel-test-build kernel-uapi-test
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	VAMS_LINUX_IMAGE="$(VAMS_LINUX_IMAGE)" \
 	VAMS_PCI_MODULE="$(VAMS_PCI_MODULE)" \
+	VAMS_UAPI_TEST="$(VAMS_UAPI_TEST)" \
 	BUSYBOX="$(BUSYBOX)" \
 	./kernel/tests/smoke-vams-pci.sh
 
