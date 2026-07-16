@@ -35,7 +35,8 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
-	pcie-smoke nop-smoke kernel kernel-test-build kernel-uapi-test kernel-smoke \
+	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
+	kernel-uapi-test kernel-smoke \
 	qemu-patch-check tree clean demo
 
 help:
@@ -62,6 +63,8 @@ help:
 	  '                   Verify firmware-owned NOP validation and completion' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
+	  '  make queue-model-smoke' \
+	  '                   Compare randomized SQ/CQ sequences with the model' \
 	  '  make abi-check    Regenerate-check and compile-test the v1 ABI' \
 	  '  make kernel       Build the production vams_pci kernel module' \
 	  '  make kernel-uapi-test' \
@@ -186,6 +189,10 @@ pcie-smoke:
 nop-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-nop.sh
+
+queue-model-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/qtest/vams-queue-model.py
 
 kernel:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)"

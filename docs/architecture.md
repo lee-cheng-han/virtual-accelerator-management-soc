@@ -39,7 +39,10 @@ negotiates a coherent DMA mask, owns BAR0, installs both MSI-X handlers, and
 allocates one coherent SQ/CQ pair when capability bit 0 is set. The current NOP
 transport is executed in the QEMU endpoint as a reference path; command-event
 routing and DMA staging must connect that path to the tested firmware portal
-before the target architecture is complete.
+before the target architecture is complete. An implementation-independent
+executable model now compares queue indices, status, errors, interrupts,
+generation changes, and completion contents with the endpoint after every
+operation in deterministic randomized sequences.
 
 ## Address spaces
 

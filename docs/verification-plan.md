@@ -22,7 +22,7 @@ documentation checks only. Planned tests are not reported as passing.
 | SYS-01/02 | boot console golden output plus timer/interrupt/reset QTests |
 | SYS-03 | Zephyr boot, task synchronization, mailbox/telemetry, and watchdog-reset tests |
 | PCI-01 | config-space/BAR/MSI-X QTest plus guest enumeration, IRQ, probe/remove, and rebind smoke |
-| ABI-01/02 | generated descriptor byte-layout compile/raw tests, NOP queue QTest, portal ownership QTest, and Zephyr valid/invalid completion test; property tests pending |
+| ABI-01/02 | generated descriptor byte-layout compile/raw tests, NOP queue QTest, portal ownership QTest, Zephyr valid/invalid completion test, and deterministic reference-model comparison |
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |
 | FLT-01 | one-shot trigger, expected evidence, clean NOP after every fault |
@@ -77,8 +77,11 @@ git diff --check
 `make check` verifies required documents, descriptor assertions as text, the
 status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`,
-`command-portal-smoke`, `firmware-command-smoke`, and `watchdog-smoke`. PCI validation uses `pcie-smoke`, `nop-smoke`, and
-`kernel-smoke`; the latter boots a disposable Linux initramfs and exercises
+`command-portal-smoke`, `firmware-command-smoke`, and `watchdog-smoke`. PCI
+validation uses `pcie-smoke`, `nop-smoke`, `queue-model-smoke`, and
+`kernel-smoke`. The model test compares every exposed queue transition and
+completion across four deterministic randomized seeds. The kernel test boots a
+disposable Linux initramfs and exercises
 coherent queues, interrupt and polling completion, version rejection, 32
 concurrent NOP ioctls, module binding, and cleanup.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.

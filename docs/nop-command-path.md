@@ -45,6 +45,15 @@ without overwriting a completion; a legal CQ-head doorbell resumes processing.
 Descriptor-read or completion-write failure marks the relevant queue and sets
 DMA plus queue error status.
 
+`make queue-model-smoke` runs an implementation-independent SQ/CQ state model
+against the live endpoint. Four fixed seeds generate 1,200 operations covering
+valid and invalid NOPs, wraparound, CQ backpressure, deferred SQ processing,
+queue disable/re-enable, quiesce, illegal doorbells, sticky interrupt
+reassertion, error clearing, and paired queue reset. Every observable queue
+register and every outstanding completion is compared after each operation.
+Failures report the seed and shortest observed failing operation prefix; custom
+seeds and operation counts can be replayed directly with the Python runner.
+
 ## NOP behavior
 
 NOP requires descriptor version 1, opcode zero, flags/reserved/CRC fields zero,
@@ -72,6 +81,7 @@ and host-ack ownership transitions. Its QTest covers overwrite rejection,
 sticky overflow/protocol errors, counters, and exact completion bytes; a Zephyr
 test covers valid and unsupported-version NOPs. The Linux driver now adds
 tracked concurrent NOPs, CQ polling fallback, and a versioned host API. The next
-work is to connect PCI queue events and DMA service to the firmware portal.
-Until then, the two sides are tested foundations rather than one firmware-owned
-PCI command plane.
+work is to connect PCI queue events and DMA service to the firmware portal. The
+reference model now covers ownership, backpressure, interrupt, and reset
+sequences, but the two sides remain tested foundations rather than one
+firmware-owned PCI command plane.

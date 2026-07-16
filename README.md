@@ -68,6 +68,8 @@ internal management peripheral, not the host datapath.
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
 - Versioned `/dev/vamsN` UAPI with tracked concurrent NOP requests
 - Lost-interrupt CQ polling fallback and bounded request cancellation
+- Deterministic SQ/CQ reference-model comparison across randomized queue,
+  wraparound, backpressure, interrupt, error, and reset sequences
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -117,6 +119,8 @@ make firmware-command-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make pcie-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make queue-model-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make nop-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64

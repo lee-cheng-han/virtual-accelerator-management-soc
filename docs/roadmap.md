@@ -24,9 +24,11 @@ SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
 validates, and completes valid and unsupported-version NOPs. The Linux driver
 now tracks concurrent requests, polls CQ as an interrupt fallback, and exposes
-a versioned host API with tested ID/cookie round trips. The gate remains open
-until PCI queue events and DMA staging use the firmware portal and the reference
-queue/property model covers ownership and reset sequences.
+a versioned host API with tested ID/cookie round trips. A deterministic
+reference model compares QEMU ownership, backpressure, wraparound, interrupt,
+error, completion, and reset state after every randomized operation. The gate
+remains open only until PCI queue events and DMA staging use the firmware
+portal.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
