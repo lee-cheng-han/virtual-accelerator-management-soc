@@ -11,7 +11,8 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
 > validates generated-ABI NOP descriptors and publishes completions, while the
 > host-facing endpoint and `vams_pci.ko` exercise coherent SQ/CQ DMA and MSI-X.
-> Connecting those two tested paths inside one PCI function remains planned.
+> A private dual-QEMU bridge now carries PCI-fetched descriptors through the
+> real Zephyr command service and returns firmware-owned completions to the CQ.
 
 ## Architecture
 
@@ -63,6 +64,8 @@ internal management peripheral, not the host datapath.
 - Authoritative JSON v1 ABI with generated portable, QEMU, and kernel headers
 - Generated firmware ABI plus a private descriptor/completion ownership portal
 - Zephyr-owned valid and unsupported-version NOP completions
+- Private PCI-to-RV32 command bridge with end-to-end Zephyr validation and
+  stale-completion suppression across queue reset
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
@@ -118,6 +121,10 @@ make command-portal-smoke \
 make firmware-command-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make firmware-pcie-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make queue-model-smoke \

@@ -8,13 +8,12 @@ allocates both rings with `dma_alloc_coherent()`, programs their 64-bit DMA
 addresses, enables CQ before SQ, enables the device, and drains completions from
 MSI-X vector 0. Capability bits DMA, MSI-X, and polling-safe CQ are advertised.
 
-The PCI path remains a transport/reference implementation: QEMU captures and
-validates its NOP descriptors directly because the standalone `vams_riscv`
-firmware harness has not yet been embedded into the PCI function. Separately,
-the private management command portal now stages the same generated descriptor
-for Zephyr, which owns the normative validation order and completion policy.
-The final requirement is not satisfied until PCI DMA and queue events use that
-firmware path. No payload opcode is implemented or advertised as working.
+The PCI model retains direct NOP validation as a standalone test fallback. In
+the integrated path it instead DMA-fetches a descriptor and sends it over a
+private chardev to the `vams_riscv` command portal. Real Zephyr firmware owns
+the normative validation order and completion policy; the returned completion
+is DMA-written into the host CQ before tail publication. No payload opcode is
+implemented or advertised as working.
 
 ## Generated ABI
 
@@ -32,12 +31,13 @@ then writes `SQ_DOORBELL`. QEMU's `pci_dma_read()` executes the DMA barrier
 before capturing all 64 bytes and advances SQ head only after a successful
 read. It validates the private copy without touching payload memory.
 
-QEMU builds a private 32-byte completion, calls `pci_dma_write()`, and advances
-CQ tail only after that write returns `MEMTX_OK`. It then sets sticky CQ status
-and notifies MSI-X vector 0 when unmasked. The driver observes CQ tail, executes
-`dma_rmb()`, copies each completion, publishes CQ head, and only then W1C-clears
-the interrupt source. Clearing CQ interrupt status while entries remain causes
-the model to reassert it.
+The standalone fallback or Zephyr firmware builds a private 32-byte completion.
+The endpoint calls `pci_dma_write()` and advances CQ tail only after that write
+returns `MEMTX_OK`. It then sets sticky CQ status and notifies MSI-X vector 0
+when unmasked. The driver observes CQ tail, executes `dma_rmb()`, copies each
+completion, publishes CQ head, and only then W1C-clears the interrupt source.
+Clearing CQ interrupt status while entries remain causes the model to reassert
+it.
 
 Both rings reserve one empty entry. Doorbells are checked as forward modulo
 advances and cannot pass the opposite owner index. CQ full stops SQ processing
@@ -80,8 +80,9 @@ The private portal uses explicit host-submit, firmware-ack, firmware-complete,
 and host-ack ownership transitions. Its QTest covers overwrite rejection,
 sticky overflow/protocol errors, counters, and exact completion bytes; a Zephyr
 test covers valid and unsupported-version NOPs. The Linux driver now adds
-tracked concurrent NOPs, CQ polling fallback, and a versioned host API. The next
-work is to connect PCI queue events and DMA service to the firmware portal. The
-reference model now covers ownership, backpressure, interrupt, and reset
-sequences, but the two sides remain tested foundations rather than one
-firmware-owned PCI command plane.
+tracked concurrent NOPs, CQ polling fallback, and a versioned host API. The
+dual-QEMU test now proves PCI queue DMA through the real firmware portal for
+valid and unsupported-version NOPs. The next command work is payload DMA and
+engine execution. It also resets the queue with a command in flight, discards
+that stale firmware completion, and verifies a clean post-reset NOP. Connection
+loss recovery and cross-process migration remain explicit limitations.

@@ -35,6 +35,7 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
+	firmware-pcie-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
 	qemu-patch-check tree clean demo
@@ -61,6 +62,8 @@ help:
 	  '                   Verify the private firmware portal state machine' \
 	  '  make firmware-command-smoke' \
 	  '                   Verify firmware-owned NOP validation and completion' \
+	  '  make firmware-pcie-smoke' \
+	  '                   Verify PCI DMA through real Zephyr command handling' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make queue-model-smoke' \
@@ -182,6 +185,12 @@ firmware-command-smoke: zephyr
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
 	./qemu/tests/smoke-vams-firmware-command.sh
 
+firmware-pcie-smoke: zephyr
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
+	./qemu/tests/smoke-vams-firmware-pcie.py
+
 pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
@@ -241,6 +250,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0004-hw-misc-add-vams-nop-queue-transport.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0006-hw-misc-bridge-vams-pci-queues-to-firmware.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

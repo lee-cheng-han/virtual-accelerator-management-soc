@@ -26,23 +26,27 @@ The QEMU integration is maintained as a small out-of-tree patch series until
 interfaces stabilize. The implemented `vams-pcie` shell connects to QEMU's
 PCIe bus with vendor `0x1b36`, device `0x1100`, revision `0x00`, and class
 `0x120000` (processing accelerator). It currently implements BAR0 identity,
-control/error handling, and MSI-X. The standalone `vams_riscv` machine remains
-the firmware validation harness. Its private command portal now exercises the
-generated descriptor/completion ABI and Zephyr-owned NOP validation; the target
-architecture will embed the same
-management components privately within `vams-pcie`, not expose a second guest
-machine. The development identity is provisional and is not an allocated
+control/error handling, and MSI-X. QEMU system binaries are target-specific, so
+an x86 system process cannot instantiate the RV32 CPU model directly. The
+hardware-free co-simulation therefore runs `vams-pcie` and the `vams_riscv`
+management subsystem in separate QEMU processes joined by a private chardev.
+Only the PCI function is host-visible. The bridge carries fixed generated-ABI
+descriptors and completions; Zephyr still owns validation and completion
+policy. The development identity is provisional and is not an allocated
 production ID.
 
 The implemented `vams_pci` driver validates the endpoint identity and interface,
 negotiates a coherent DMA mask, owns BAR0, installs both MSI-X handlers, and
 allocates one coherent SQ/CQ pair when capability bit 0 is set. The current NOP
-transport is executed in the QEMU endpoint as a reference path; command-event
-routing and DMA staging must connect that path to the tested firmware portal
-before the target architecture is complete. An implementation-independent
-executable model now compares queue indices, status, errors, interrupts,
-generation changes, and completion contents with the endpoint after every
-operation in deterministic randomized sequences.
+transport retains an in-process validator for isolated endpoint tests. In the
+integrated configuration, the endpoint DMA-fetches one descriptor, stages it
+over the private bridge, waits for real Zephyr firmware to complete it, and
+then DMA-publishes the returned completion. An implementation-independent
+executable model compares queue indices, status, errors, interrupts, generation
+changes, and completion contents with the endpoint after every operation in
+deterministic randomized sequences. Queue or device reset marks an in-flight
+bridge result for discard, preventing a pre-reset firmware completion from
+entering the new CQ generation.
 
 ## Address spaces
 

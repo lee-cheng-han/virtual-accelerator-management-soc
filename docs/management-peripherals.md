@@ -30,8 +30,8 @@ already set is rejected and records a bad write.
 
 The current model's `vams-mgmt.test-message` QOM property injects one nonzero
 message at cold boot. Message `0x00000001` is a ping and returns
-`0x80000001`; unsupported values return `0xffffffff`. The PCIe model will
-replace this test injection path with its internal event bridge.
+`0x80000001`; unsupported values return `0xffffffff`. The PCIe integration uses
+a separate private command bridge and does not reuse this mailbox test path.
 
 ## Private command portal
 
@@ -63,7 +63,8 @@ The Zephyr command task polls for bit 0, validates NOP using the normative first
 error order, and publishes a completion with the original ID and cookie. The
 `vams-mgmt.test-command` property injects a valid NOP with value `1` or an
 unsupported-version NOP with value `2` at cold boot. This is deterministic test
-injection only; the future PCI bridge will drive the same ownership registers.
+injection only. The optional `command-chardev` property now drives the same
+ownership registers from the PCI queue controller in the dual-QEMU test.
 
 ## Watchdog, reset, and telemetry registers
 

@@ -77,11 +77,14 @@ git diff --check
 `make check` verifies required documents, descriptor assertions as text, the
 status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`,
-`command-portal-smoke`, `firmware-command-smoke`, and `watchdog-smoke`. PCI
-validation uses `pcie-smoke`, `nop-smoke`, `queue-model-smoke`, and
-`kernel-smoke`. The model test compares every exposed queue transition and
-completion across four deterministic randomized seeds. The kernel test boots a
-disposable Linux initramfs and exercises
-coherent queues, interrupt and polling completion, version rejection, 32
-concurrent NOP ioctls, module binding, and cleanup.
+`command-portal-smoke`, `firmware-command-smoke`, `firmware-pcie-smoke`, and
+`watchdog-smoke`. PCI validation uses `pcie-smoke`, `nop-smoke`,
+`queue-model-smoke`, and `kernel-smoke`. The model test compares every exposed
+queue transition and completion across four deterministic randomized seeds.
+The kernel test boots a disposable Linux initramfs and exercises coherent
+queues, interrupt and polling completion, version rejection, 32 concurrent NOP
+ioctls, module binding, and cleanup.
+`firmware-pcie-smoke` separately proves valid and invalid PCI submissions cross
+the private bridge into real Zephyr, and that an in-flight pre-reset completion
+is discarded before a clean post-reset command completes.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
