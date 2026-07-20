@@ -82,6 +82,10 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0006-hw-misc-bridge-vams-pci-queues-to-firmware.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0007-hw-misc-add-vams-memory-copy-engine.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0008-hw-misc-add-vams-memory-fill-engine.patch"
 ```
 
 Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both

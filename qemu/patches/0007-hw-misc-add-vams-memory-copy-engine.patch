@@ -1,0 +1,210 @@
+Subject: [PATCH] hw/misc: add VAMS memory-copy engine
+
+Extend the command validator with MEM_COPY range checks and execute authorized
+copies through PCI DMA.  Preserve the firmware-approved bridged submission,
+report directional DMA or engine failures without partial success, publish the
+processed byte count only after the destination write completes, and retain the
+submission in migration state.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+index e45a09ae1a..e69a9b3379 100644
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -127,6 +127,10 @@ struct VamsPcieState {
+     uint32_t cq_control;
+     bool cq_error;
+     CharFrontend command_chr;
++    union {
++        struct vams_submission command;
++        uint8_t bytes[VAMS_SUBMISSION_SIZE];
++    } bridge_submission;
+     uint8_t bridge_completion[VAMS_COMPLETION_SIZE];
+     uint32_t bridge_completion_pos;
+     bool bridge_inflight;
+@@ -248,14 +252,33 @@ static void vams_pcie_queue_reset(VamsPcieState *s)
+     s->reset_generation++;
+ }
+ 
+-static uint16_t vams_pcie_validate_nop(const struct vams_submission *submission)
++static bool vams_pcie_range_overflows(uint64_t address, uint32_t length)
+ {
++    return address > UINT64_MAX - ((uint64_t)length - 1);
++}
++
++static bool vams_pcie_ranges_overlap(uint64_t first, uint64_t second,
++                                     uint32_t length)
++{
++    uint64_t first_end = first + length - 1;
++    uint64_t second_end = second + length - 1;
++
++    return first <= second_end && second <= first_end;
++}
++
++static uint16_t vams_pcie_validate_command(
++    const struct vams_submission *submission)
++{
++    uint64_t destination;
++    uint64_t source;
++    uint32_t length;
+     uint32_t timeout_ms;
+ 
+     if (le16_to_cpu(submission->version) != VAMS_DESC_VERSION_1) {
+         return VAMS_ERR_UNSUPPORTED_VERSION;
+     }
+-    if (submission->opcode != VAMS_OP_NOP) {
++    if (submission->opcode != VAMS_OP_NOP &&
++        submission->opcode != VAMS_OP_MEM_COPY) {
+         return VAMS_ERR_INVALID_OPCODE;
+     }
+     if (submission->flags) {
+@@ -271,13 +294,28 @@ static uint16_t vams_pcie_validate_nop(const struct vams_submission *submission)
+     if (timeout_ms > 60000) {
+         return VAMS_ERR_INVALID_TIMEOUT;
+     }
+-    if (le32_to_cpu(submission->length)) {
++    length = le32_to_cpu(submission->length);
++    source = le64_to_cpu(submission->source_dma);
++    destination = le64_to_cpu(submission->destination_dma);
++    if (submission->opcode == VAMS_OP_NOP && length) {
+         return VAMS_ERR_INVALID_LENGTH;
+     }
+-    if (le64_to_cpu(submission->source_dma) ||
+-        le64_to_cpu(submission->destination_dma)) {
++    if (submission->opcode == VAMS_OP_NOP && (source || destination)) {
+         return VAMS_ERR_INVALID_ADDRESS;
+     }
++    if (submission->opcode == VAMS_OP_MEM_COPY) {
++        if (!length || length > 0x01000000) {
++            return VAMS_ERR_INVALID_LENGTH;
++        }
++        if (vams_pcie_range_overflows(source, length) ||
++            vams_pcie_range_overflows(destination, length)) {
++            return VAMS_ERR_ADDRESS_OVERFLOW;
++        }
++        if (!source || !destination ||
++            vams_pcie_ranges_overlap(source, destination, length)) {
++            return VAMS_ERR_INVALID_ADDRESS;
++        }
++    }
+     return VAMS_ERR_NONE;
+ }
+ 
+@@ -302,6 +340,55 @@ static bool vams_pcie_publish_completion(
+     return true;
+ }
+ 
++static void vams_pcie_complete_dma_error(struct vams_completion *completion,
++                                         uint16_t error)
++{
++    completion->status = cpu_to_le16(VAMS_STATUS_FAILED);
++    completion->error_code = cpu_to_le16(error);
++    completion->bytes_processed = 0;
++    completion->result_crc = 0;
++}
++
++static void vams_pcie_execute_mem_copy(
++    VamsPcieState *s, const struct vams_submission *submission,
++    struct vams_completion *completion)
++{
++    PCIDevice *pdev = PCI_DEVICE(s);
++    uint32_t length = le32_to_cpu(submission->length);
++    uint8_t *buffer;
++    MemTxResult result;
++
++    if (le16_to_cpu(completion->status) != VAMS_STATUS_SUCCESS ||
++        submission->opcode != VAMS_OP_MEM_COPY) {
++        return;
++    }
++    if (vams_pcie_validate_command(submission) != VAMS_ERR_NONE) {
++        vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
++        return;
++    }
++
++    buffer = g_try_malloc(length);
++    if (!buffer) {
++        vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
++        return;
++    }
++    result = pci_dma_read(pdev, le64_to_cpu(submission->source_dma), buffer,
++                          length);
++    if (result != MEMTX_OK) {
++        vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_READ);
++        g_free(buffer);
++        return;
++    }
++    result = pci_dma_write(pdev, le64_to_cpu(submission->destination_dma),
++                           buffer, length);
++    g_free(buffer);
++    if (result != MEMTX_OK) {
++        vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_WRITE);
++        return;
++    }
++    completion->bytes_processed = cpu_to_le32(length);
++}
++
+ static int vams_pcie_bridge_can_receive(void *opaque)
+ {
+     VamsPcieState *s = opaque;
+@@ -332,6 +419,9 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+         return;
+     }
+     s->bridge_inflight = false;
++    vams_pcie_execute_mem_copy(
++        s, &s->bridge_submission.command,
++        (struct vams_completion *)s->bridge_completion);
+     vams_pcie_publish_completion(
+         s, (const struct vams_completion *)s->bridge_completion);
+     vams_pcie_process_sq(s);
+@@ -380,6 +470,7 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+             int written;
+ 
+             s->bridge_inflight = true;
++            s->bridge_submission.command = submission;
+             written = qemu_chr_fe_write_all(
+                 &s->command_chr, (const uint8_t *)&submission,
+                 sizeof(submission));
+@@ -395,7 +486,7 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+         }
+         s->sq_head = (s->sq_head + 1) & (s->sq_depth - 1);
+ 
+-        error_code = vams_pcie_validate_nop(&submission);
++        error_code = vams_pcie_validate_command(&submission);
+         completion.command_id = submission.command_id;
+         completion.status = cpu_to_le16(error_code == VAMS_ERR_NONE ?
+                                         VAMS_STATUS_SUCCESS :
+@@ -405,6 +496,8 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+         completion.device_timestamp = cpu_to_le64(
+             qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+ 
++        vams_pcie_execute_mem_copy(s, &submission, &completion);
++
+         if (!vams_pcie_publish_completion(s, &completion)) {
+             return;
+         }
+@@ -802,7 +895,7 @@ static const MemoryRegionOps vams_pcie_bar0_ops = {
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 3,
++    .version_id = 4,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+@@ -830,6 +923,7 @@ static const VMStateDescription vams_pcie_vmstate = {
+         VMSTATE_UINT32(cq_tail, VamsPcieState),
+         VMSTATE_UINT32(cq_control, VamsPcieState),
+         VMSTATE_BOOL(cq_error, VamsPcieState),
++        VMSTATE_BUFFER_V(bridge_submission.bytes, VamsPcieState, 4),
+         VMSTATE_UINT8_ARRAY_V(bridge_completion, VamsPcieState,
+                               VAMS_COMPLETION_SIZE, 3),
+         VMSTATE_UINT32_V(bridge_completion_pos, VamsPcieState, 3),
+@@ -866,6 +960,7 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->cq_tail = 0;
+     s->cq_control = 0;
+     s->cq_error = false;
++    memset(&s->bridge_submission, 0, sizeof(s->bridge_submission));
+     s->bridge_completion_pos = 0;
+     s->bridge_inflight = false;
+     s->bridge_discard_completion = false;
+

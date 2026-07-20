@@ -48,6 +48,13 @@ deterministic randomized sequences. Queue or device reset marks an in-flight
 bridge result for discard, preventing a pre-reset firmware completion from
 entering the new CQ generation.
 
+For `MEM_COPY` and `MEM_FILL`, Zephyr validates version, opcode, flags, reserved
+fields, timeout, length, overflow, and required addresses before authorizing
+execution. Copy additionally rejects overlapping ranges. The PCI model rechecks
+the hardware safety conditions, constructs a bounded private payload buffer,
+DMA-writes the destination, and reports `bytes_processed` only after that write
+succeeds. Copy reads the full source; fill reads exactly one source byte.
+
 ## Address spaces
 
 Host BAR0 is one 4 KiB non-prefetchable register BAR. A later optional BAR2 may

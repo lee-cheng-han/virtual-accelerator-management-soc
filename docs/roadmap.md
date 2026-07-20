@@ -19,7 +19,8 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 | **9 — Stress/performance** | Model/property queue tests, ring wrap, million-command and long-duration runs, repeated reset, histogram, throughput, stack/SRAM use, watchdog margin and queue high-water report. |
 | **10 — CI/demo** | Pinned reproducible builds, compatibility matrix, coverage/static analysis/fuzzing and layered tests in CI; unified trace export; `make demo` boots, submits, verifies, faults, recovers, and reports PASS/FAIL. |
 
-Current gate: command transport is complete. In addition to coherent PCI
+Current gate: DMA and engine execution are in progress. Command transport is
+complete. In addition to coherent PCI
 SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
 validates, and completes valid and unsupported-version NOPs. The Linux driver
@@ -28,10 +29,12 @@ a versioned host API with tested ID/cookie round trips. A deterministic
 reference model compares QEMU ownership, backpressure, wraparound, interrupt,
 error, completion, and reset state after every randomized operation. The
 dual-QEMU integration now DMA-stages PCI submissions through the private portal,
-runs real Zephyr validation, and DMA-publishes firmware completions. Work moves
-next to payload DMA and the processing engine. Basic queue-reset stale-result
-suppression is tested; broader timeout, disconnect, and reset recovery remains
-in the recovery gate.
+runs real Zephyr validation, and DMA-publishes firmware completions. Basic
+queue-reset stale-result suppression is tested. Firmware now validates
+`MEM_COPY` and `MEM_FILL`, and the QEMU engine performs exact checked PCI payload
+DMA with guarded data-integrity coverage. CRC32, vector add, asynchronous engine
+execution, fuzzing, and throughput evidence remain before this gate closes.
+Broader timeout, disconnect, and reset recovery remains in the recovery gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a

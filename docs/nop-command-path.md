@@ -12,8 +12,8 @@ The PCI model retains direct NOP validation as a standalone test fallback. In
 the integrated path it instead DMA-fetches a descriptor and sends it over a
 private chardev to the `vams_riscv` command portal. Real Zephyr firmware owns
 the normative validation order and completion policy; the returned completion
-is DMA-written into the host CQ before tail publication. No payload opcode is
-implemented or advertised as working.
+is DMA-written into the host CQ before tail publication. `MEM_COPY` and `MEM_FILL` are now
+only implemented payload opcode and is documented separately.
 
 ## Generated ABI
 
@@ -82,7 +82,7 @@ sticky overflow/protocol errors, counters, and exact completion bytes; a Zephyr
 test covers valid and unsupported-version NOPs. The Linux driver now adds
 tracked concurrent NOPs, CQ polling fallback, and a versioned host API. The
 dual-QEMU test now proves PCI queue DMA through the real firmware portal for
-valid and unsupported-version NOPs. The next command work is payload DMA and
-engine execution. It also resets the queue with a command in flight, discards
+valid and unsupported-version NOPs. It also resets the queue with a command in
+flight, discards
 that stale firmware completion, and verifies a clean post-reset NOP. Connection
 loss recovery and cross-process migration remain explicit limitations.

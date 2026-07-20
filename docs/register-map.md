@@ -6,9 +6,12 @@ must not advertise a feature until it works.
 
 The current QEMU PCIe model implements identification/device control, SQ/CQ,
 and interrupt control. It advertises capability bits 0, 1, and 5: DMA, MSI-X,
-and polling-safe CQ. Watchdog bridge, host telemetry snapshot, payload engine,
-and debug blocks remain unimplemented and return illegal-MMIO behavior. See the
-[NOP command-path guide](nop-command-path.md) for the exact implemented subset.
+and polling-safe CQ. MEM_COPY and MEM_FILL payload DMA are implemented without
+the planned engine-control register block. Watchdog bridge, host telemetry
+snapshot, engine registers, and debug blocks remain unimplemented and return
+illegal-MMIO behavior. See the [NOP command-path guide](nop-command-path.md),
+[MEM_COPY guide](mem-copy-command-path.md), and
+[MEM_FILL guide](mem-fill-command-path.md) for the implemented subset.
 
 ## Global rules
 

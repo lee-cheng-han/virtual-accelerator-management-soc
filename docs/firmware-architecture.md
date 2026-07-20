@@ -6,9 +6,11 @@ register side effects; the host owns buffer mapping and ring production.
 
 The current standalone harness implements the first policy slice as one polling
 command-service task: it captures a generated-ABI descriptor from the private
-portal, acknowledges ownership, validates NOP in fixed first-error order, and
-publishes the completion. The task decomposition below remains the target for
-PCI DMA, scheduling, payload execution, and recovery.
+portal, acknowledges ownership, validates NOP, MEM_COPY, or MEM_FILL in fixed
+first-error order, and publishes an authorization completion. The PCI model
+performs the authorized payload operation and finalizes its byte count. The task
+decomposition below remains the target for asynchronous scheduling, engine
+monitoring, and recovery.
 
 ## Boot and steady state
 

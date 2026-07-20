@@ -10,7 +10,8 @@ SPEC_DOCS := README.md \
 	docs/verification-plan.md docs/performance-plan.md docs/demo.md \
 	docs/minimal-riscv-subsystem.md docs/zephyr-board-port.md \
 	docs/management-peripherals.md docs/pcie-endpoint.md \
-	docs/linux-pci-driver.md docs/nop-command-path.md
+	docs/linux-pci-driver.md docs/nop-command-path.md \
+	docs/mem-copy-command-path.md docs/mem-fill-command-path.md
 
 SPEC_DOCS += docs/linux-uapi.md
 
@@ -35,7 +36,7 @@ VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
-	firmware-pcie-smoke \
+	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
 	qemu-patch-check tree clean demo
@@ -64,6 +65,10 @@ help:
 	  '                   Verify firmware-owned NOP validation and completion' \
 	  '  make firmware-pcie-smoke' \
 	  '                   Verify PCI DMA through real Zephyr command handling' \
+	  '  make mem-copy-smoke' \
+	  '                   Verify firmware-owned payload copy and validation' \
+	  '  make mem-fill-smoke' \
+	  '                   Verify firmware-owned payload fill and validation' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make queue-model-smoke' \
@@ -89,7 +94,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Firmware-owned NOP validation implemented' README.md; \
+	grep -q 'Firmware-owned MEM_COPY and MEM_FILL implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -191,6 +196,10 @@ firmware-pcie-smoke: zephyr
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
 	./qemu/tests/smoke-vams-firmware-pcie.py
 
+mem-copy-smoke: firmware-pcie-smoke
+
+mem-fill-smoke: firmware-pcie-smoke
+
 pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
@@ -254,6 +263,14 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0005-hw-misc-add-vams-firmware-command-portal.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0006-hw-misc-bridge-vams-pci-queues-to-firmware.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0006-hw-misc-bridge-vams-pci-queues-to-firmware.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0007-hw-misc-add-vams-memory-copy-engine.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0007-hw-misc-add-vams-memory-copy-engine.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0008-hw-misc-add-vams-memory-fill-engine.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

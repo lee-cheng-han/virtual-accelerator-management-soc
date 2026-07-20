@@ -6,13 +6,15 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Firmware-owned NOP validation implemented.** The
+> Status: **Firmware-owned MEM_COPY and MEM_FILL implemented.** The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
 > validates generated-ABI NOP descriptors and publishes completions, while the
 > host-facing endpoint and `vams_pci.ko` exercise coherent SQ/CQ DMA and MSI-X.
 > A private dual-QEMU bridge now carries PCI-fetched descriptors through the
 > real Zephyr command service and returns firmware-owned completions to the CQ.
+> Firmware-validated `MEM_COPY` and `MEM_FILL` now perform checked PCI payload
+> DMA with exact byte-count and guard-region verification.
 
 ## Architecture
 
@@ -66,6 +68,7 @@ internal management peripheral, not the host datapath.
 - Zephyr-owned valid and unsupported-version NOP completions
 - Private PCI-to-RV32 command bridge with end-to-end Zephyr validation and
   stale-completion suppression across queue reset
+- Firmware-owned `MEM_COPY` and `MEM_FILL` validation with QEMU PCI DMA execution
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
@@ -125,6 +128,14 @@ make firmware-pcie-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make mem-copy-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make mem-fill-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make queue-model-smoke \
@@ -167,6 +178,8 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [Linux PCI driver](docs/linux-pci-driver.md) | Probe/remove, ABI validation, IRQs, cleanup, and guest test |
 | [Linux UAPI](docs/linux-uapi.md) | Versioning, device info, synchronous NOP, and lifetime rules |
 | [NOP command path](docs/nop-command-path.md) | Generated ABI, coherent rings, ordering, NOP, and limitations |
+| [MEM_COPY command path](docs/mem-copy-command-path.md) | Firmware validation, payload DMA, ordering, and integrity tests |
+| [MEM_FILL command path](docs/mem-fill-command-path.md) | Firmware validation, write-only DMA, ordering, and integrity tests |
 
 ## Planned repository areas
 
@@ -178,14 +191,13 @@ scaffolding and gain tracked files only when their components are built.
 
 ## Known limitations
 
-- The RISC-V management subsystem and PCIe endpoint shell are executable, but
-  they are not connected into one private device instance yet.
-- The endpoint advertises DMA, MSI-X, and polling-safe CQ for its NOP queue
-  transport. Payload engines, firmware bridge, telemetry, and debug capabilities
-  remain clear until their host-facing paths work.
-- Zephyr owns NOP validation in the standalone management harness, but the PCI
-  queue still uses its QEMU reference validator until the private portal is
-  embedded and connected to PCI DMA.
+- Target-specific QEMU binaries require the PCI endpoint and RV32 management
+  subsystem to run as two processes joined by a private local bridge.
+- `MEM_COPY` and `MEM_FILL` use a synchronous correctness-first QEMU engine.
+  CRC32, vector add, asynchronous execution, engine registers, and host
+  telemetry are not implemented.
+- The endpoint retains a direct validator only for isolated QTests; integrated
+  NOP, MEM_COPY, and MEM_FILL commands use real Zephyr validation.
 - The public host API currently exposes device information and synchronous NOP;
   payload mapping and asynchronous userspace submission remain future work.
 - The provisional development PCI ID is not allocated for production use.

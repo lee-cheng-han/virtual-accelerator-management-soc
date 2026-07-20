@@ -15,6 +15,12 @@ import time
 BAR0 = 0xFEBF0000
 SQ_BASE = 0x100000
 CQ_BASE = 0x110000
+PAYLOAD_SOURCE = 0x120003
+PAYLOAD_DESTINATION = 0x130005
+PAYLOAD_LENGTH = 4097
+FILL_SOURCE = 0x121001
+FILL_DESTINATION = 0x140007
+FILL_LENGTH = 4111
 SUBMISSION = struct.Struct("<HBBIQQIIQIIQQ")
 COMPLETION = struct.Struct("<IHHIIQQ")
 
@@ -136,9 +142,11 @@ def configure_queues(qtest):
         qtest.write32(BAR0 + offset, value)
 
 
-def submission(version, command_id, cookie):
+def submission(version, command_id, cookie, opcode=0, source=0,
+               destination=0, length=0):
     return SUBMISSION.pack(
-        version, 0, 0, command_id, 0, 0, 0, 0, cookie, 0, 0, 0, 0
+        version, opcode, 0, command_id, source, destination, length, 0,
+        cookie, 0, 0, 0, 0
     )
 
 
@@ -264,6 +272,187 @@ def main():
                 check_completion(
                     qtest, 0, (0xD0E0F000, 0, 0, 0, 0, clean_cookie)
                 )
+                qtest.write32(BAR0 + 0x214, 1)
+
+                payload = bytes(
+                    ((index * 37) + 11) & 0xFF
+                    for index in range(PAYLOAD_LENGTH)
+                )
+                guard = bytes([0xA5]) * 16
+                qtest.write(PAYLOAD_SOURCE, payload)
+                qtest.write(
+                    PAYLOAD_DESTINATION - len(guard),
+                    guard + bytes(PAYLOAD_LENGTH) + guard,
+                )
+                copy_cookie = 0x13579BDF2468ACE0
+                qtest.write(
+                    SQ_BASE + SUBMISSION.size,
+                    submission(
+                        1, 0xC0DEC001, copy_cookie, opcode=1,
+                        source=PAYLOAD_SOURCE,
+                        destination=PAYLOAD_DESTINATION,
+                        length=PAYLOAD_LENGTH,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 2)
+                wait_for_completion(qtest, 2)
+                check_completion(
+                    qtest, 1,
+                    (0xC0DEC001, 0, 0, PAYLOAD_LENGTH, 0, copy_cookie),
+                )
+                copied = qtest.read(PAYLOAD_DESTINATION, PAYLOAD_LENGTH)
+                before = qtest.read(PAYLOAD_DESTINATION - len(guard),
+                                    len(guard))
+                after = qtest.read(PAYLOAD_DESTINATION + PAYLOAD_LENGTH,
+                                   len(guard))
+                if copied != payload or before != guard or after != guard:
+                    raise AssertionError("MEM_COPY data or guard mismatch")
+                qtest.write32(BAR0 + 0x214, 2)
+
+                overlap_cookie = 0x1029384756ABCDEF
+                qtest.write(
+                    SQ_BASE + 2 * SUBMISSION.size,
+                    submission(
+                        1, 0xC0DEC002, overlap_cookie, opcode=1,
+                        source=PAYLOAD_SOURCE,
+                        destination=PAYLOAD_SOURCE + 8,
+                        length=64,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 3)
+                wait_for_completion(qtest, 3)
+                check_completion(
+                    qtest, 2, (0xC0DEC002, 1, 9, 0, 0, overlap_cookie)
+                )
+                qtest.write32(BAR0 + 0x214, 3)
+
+                invalid_copies = (
+                    (3, 4, 0xC0DEC003, 0x3000000000000003,
+                     PAYLOAD_SOURCE, PAYLOAD_DESTINATION, 0, 6),
+                    (4, 5, 0xC0DEC004, 0x4000000000000004,
+                     (1 << 64) - 32, PAYLOAD_DESTINATION, 64, 8),
+                    (5, 6, 0xC0DEC005, 0x5000000000000005,
+                     0, PAYLOAD_DESTINATION, 64, 9),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        length, error in invalid_copies:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=1,
+                            source=source, destination=destination,
+                            length=length,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 1, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                dma_failures = (
+                    (6, 7, 0xC0DEC006, 0x6000000000000006,
+                     0x40000000, PAYLOAD_DESTINATION, 16),
+                    (7, 8, 0xC0DEC007, 0x7000000000000007,
+                     PAYLOAD_SOURCE, 0x40000000, 17),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        error in dma_failures:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=1,
+                            source=source, destination=destination, length=64,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 2, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                fill_value = 0x6D
+                fill_guard = bytes([0x3C]) * 16
+                qtest.write(FILL_SOURCE, bytes([fill_value]))
+                qtest.write(
+                    FILL_DESTINATION - len(fill_guard),
+                    fill_guard + bytes(FILL_LENGTH) + fill_guard,
+                )
+                fill_cookie = 0x8A7B6C5D4E3F2011
+                qtest.write(
+                    SQ_BASE + 8 * SUBMISSION.size,
+                    submission(
+                        1, 0xF1110001, fill_cookie, opcode=2,
+                        source=FILL_SOURCE, destination=FILL_DESTINATION,
+                        length=FILL_LENGTH,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 9)
+                wait_for_completion(qtest, 9)
+                check_completion(
+                    qtest, 8,
+                    (0xF1110001, 0, 0, FILL_LENGTH, 0, fill_cookie),
+                )
+                filled = qtest.read(FILL_DESTINATION, FILL_LENGTH)
+                before = qtest.read(
+                    FILL_DESTINATION - len(fill_guard), len(fill_guard)
+                )
+                after = qtest.read(
+                    FILL_DESTINATION + FILL_LENGTH, len(fill_guard)
+                )
+                if (filled != bytes([fill_value]) * FILL_LENGTH or
+                        before != fill_guard or after != fill_guard):
+                    raise AssertionError("MEM_FILL data or guard mismatch")
+                qtest.write32(BAR0 + 0x214, 9)
+
+                invalid_fills = (
+                    (9, 10, 0xF1110002, 0x9000000000000009,
+                     FILL_SOURCE, FILL_DESTINATION, 0, 6),
+                    (10, 11, 0xF1110003, 0xA00000000000000A,
+                     FILL_SOURCE, (1 << 64) - 32, 64, 8),
+                    (11, 12, 0xF1110004, 0xB00000000000000B,
+                     0, FILL_DESTINATION, 64, 9),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        length, error in invalid_fills:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=2,
+                            source=source, destination=destination,
+                            length=length,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 1, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                fill_dma_failures = (
+                    (12, 13, 0xF1110005, 0xC00000000000000C,
+                     0x40000000, FILL_DESTINATION, 16),
+                    (13, 14, 0xF1110006, 0xD00000000000000D,
+                     FILL_SOURCE, 0x40000000, 17),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        error in fill_dma_failures:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=2,
+                            source=source, destination=destination, length=64,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 2, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -286,6 +475,32 @@ def main():
                 "cookie=0xaabbccddeeff0011",
                 "Command: id=0xd0e0f000 status=0 error=0 "
                 "cookie=0x0f1e2d3c4b5a6978",
+                "Command: id=0xc0dec001 status=0 error=0 "
+                "cookie=0x13579bdf2468ace0",
+                "Command: id=0xc0dec002 status=1 error=9 "
+                "cookie=0x1029384756abcdef",
+                "Command: id=0xc0dec003 status=1 error=6 "
+                "cookie=0x3000000000000003",
+                "Command: id=0xc0dec004 status=1 error=8 "
+                "cookie=0x4000000000000004",
+                "Command: id=0xc0dec005 status=1 error=9 "
+                "cookie=0x5000000000000005",
+                "Command: id=0xc0dec006 status=0 error=0 "
+                "cookie=0x6000000000000006",
+                "Command: id=0xc0dec007 status=0 error=0 "
+                "cookie=0x7000000000000007",
+                "Command: id=0xf1110001 status=0 error=0 "
+                "cookie=0x8a7b6c5d4e3f2011",
+                "Command: id=0xf1110002 status=1 error=6 "
+                "cookie=0x9000000000000009",
+                "Command: id=0xf1110003 status=1 error=8 "
+                "cookie=0xa00000000000000a",
+                "Command: id=0xf1110004 status=1 error=9 "
+                "cookie=0xb00000000000000b",
+                "Command: id=0xf1110005 status=0 error=0 "
+                "cookie=0xc00000000000000c",
+                "Command: id=0xf1110006 status=0 error=0 "
+                "cookie=0xd00000000000000d",
             )
             if not all(line in firmware_output for line in required):
                 print(firmware_output, file=sys.stderr)
@@ -298,7 +513,9 @@ def main():
             print(firmware_output, file=sys.stderr)
             return return_code
 
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=4 host=3 PASS")
+    print("VAMS firmware-owned MEM_COPY/MEM_FILL: "
+          "data=PASS validation=PASS DMA-errors=PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=17 host=16 PASS")
     return 0
 
 

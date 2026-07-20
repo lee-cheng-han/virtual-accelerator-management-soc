@@ -86,5 +86,9 @@ queues, interrupt and polling completion, version rejection, 32 concurrent NOP
 ioctls, module binding, and cleanup.
 `firmware-pcie-smoke` separately proves valid and invalid PCI submissions cross
 the private bridge into real Zephyr, and that an in-flight pre-reset completion
-is discarded before a clean post-reset command completes.
+is discarded before a clean post-reset command completes. The same integration
+test, exposed as `mem-copy-smoke` and `mem-fill-smoke`, verifies odd-length
+patterned copy and fill operations, exact byte counts, destination guards, zero
+length, 64-bit range overflow, zero addresses, copy overlap rejection, and
+directional DMA failures.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
