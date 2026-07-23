@@ -9,6 +9,9 @@
     "CRC32": 3,
     "VECTOR_ADD": 4
   },
+  "submission_flags": {
+    "VERIFY_CRC": 1
+  },
   "completion_status": {
     "SUCCESS": 0,
     "INVALID": 1,

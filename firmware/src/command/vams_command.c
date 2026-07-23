@@ -37,14 +37,20 @@ static uint16_t vams_validate_command(const struct vams_submission *submission)
 		return VAMS_ERR_UNSUPPORTED_VERSION;
 	}
 	if (opcode != VAMS_OP_NOP && opcode != VAMS_OP_MEM_COPY &&
-	    opcode != VAMS_OP_MEM_FILL) {
+	    opcode != VAMS_OP_MEM_FILL && opcode != VAMS_OP_CRC32) {
 		return VAMS_ERR_INVALID_OPCODE;
 	}
-	if (submission->flags != 0U) {
+	if ((opcode == VAMS_OP_CRC32 &&
+	     (submission->flags & ~VAMS_SUB_F_VERIFY_CRC) != 0U) ||
+	    (opcode != VAMS_OP_CRC32 && submission->flags != 0U)) {
 		return VAMS_ERR_INVALID_FLAGS;
 	}
-	if (sys_le32_to_cpu(submission->expected_crc) != 0U ||
-	    sys_le32_to_cpu(submission->reserved0) != 0U ||
+	if ((opcode != VAMS_OP_CRC32 ||
+	     (submission->flags & VAMS_SUB_F_VERIFY_CRC) == 0U) &&
+	    sys_le32_to_cpu(submission->expected_crc) != 0U) {
+		return VAMS_ERR_RESERVED_NONZERO;
+	}
+	if (sys_le32_to_cpu(submission->reserved0) != 0U ||
 	    sys_le64_to_cpu(submission->reserved1) != 0U ||
 	    sys_le64_to_cpu(submission->reserved2) != 0U) {
 		return VAMS_ERR_RESERVED_NONZERO;
@@ -79,6 +85,17 @@ static uint16_t vams_validate_command(const struct vams_submission *submission)
 			return VAMS_ERR_ADDRESS_OVERFLOW;
 		}
 		if (source == 0U || destination == 0U) {
+			return VAMS_ERR_INVALID_ADDRESS;
+		}
+	}
+	if (opcode == VAMS_OP_CRC32) {
+		if (length == 0U || length > VAMS_MAX_TRANSFER_SIZE) {
+			return VAMS_ERR_INVALID_LENGTH;
+		}
+		if (vams_range_overflows(source, length)) {
+			return VAMS_ERR_ADDRESS_OVERFLOW;
+		}
+		if (source == 0U || destination != 0U) {
 			return VAMS_ERR_INVALID_ADDRESS;
 		}
 	}

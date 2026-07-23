@@ -39,6 +39,27 @@ expected = bytes.fromhex(
 )
 assert nop == expected
 
+crc32 = struct.pack(
+    submission_format,
+    schema["descriptor_version"],
+    schema["opcodes"]["CRC32"],
+    schema["submission_flags"]["VERIFY_CRC"],
+    0xA1B2C3D4,
+    0x0102030405060708,
+    0,
+    4097,
+    5000,
+    0x8877665544332211,
+    0xCBF43926,
+    0,
+    0,
+    0,
+)
+assert crc32[2:4] == bytes((schema["opcodes"]["CRC32"], 1))
+assert crc32[8:16] == bytes.fromhex("0807060504030201")
+assert crc32[24:32] == bytes.fromhex("0110000088130000")
+assert crc32[40:44] == bytes.fromhex("2639f4cb")
+
 completion = struct.pack(
     completion_format,
     0x11223344,

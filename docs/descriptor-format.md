@@ -55,6 +55,10 @@ firmware to compare the result with `expected_crc`. Bits 1–7 must be zero.
 `expected_crc` must be zero unless that flag is set. All reserved fields must be
 zero. Nonzero reserved data is an error, never silently ignored.
 
+```c
+#define VAMS_SUB_F_VERIFY_CRC 0x01U
+```
+
 ## Completion descriptor
 
 ```c

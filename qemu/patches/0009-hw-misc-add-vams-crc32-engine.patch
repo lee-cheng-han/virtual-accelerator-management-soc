@@ -1,0 +1,123 @@
+Subject: [PATCH] hw/misc: add VAMS CRC32 engine
+
+Authorize CRC32 through the firmware bridge and compute the normative IEEE
+result over PCI DMA input. Add the generated verification flag, preserve the
+computed result on mismatch, reject invalid flag and address combinations, and
+report source DMA failures without partial completion.
+
+---
+diff --git a/include/hw/misc/vams_abi.h b/include/hw/misc/vams_abi.h
+--- a/include/hw/misc/vams_abi.h
++++ b/include/hw/misc/vams_abi.h
+@@ -12,6 +12,7 @@
+ #define VAMS_OP_MEM_FILL 0x0002U
+ #define VAMS_OP_CRC32 0x0003U
+ #define VAMS_OP_VECTOR_ADD 0x0004U
++#define VAMS_SUB_F_VERIFY_CRC 0x0001U
+ #define VAMS_STATUS_SUCCESS 0x0000U
+ #define VAMS_STATUS_INVALID 0x0001U
+ #define VAMS_STATUS_FAILED 0x0002U
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -279,14 +279,21 @@ static uint16_t vams_pcie_validate_command(
+     }
+     if (submission->opcode != VAMS_OP_NOP &&
+         submission->opcode != VAMS_OP_MEM_COPY &&
+-        submission->opcode != VAMS_OP_MEM_FILL) {
++        submission->opcode != VAMS_OP_MEM_FILL &&
++        submission->opcode != VAMS_OP_CRC32) {
+         return VAMS_ERR_INVALID_OPCODE;
+     }
+-    if (submission->flags) {
++    if ((submission->opcode == VAMS_OP_CRC32 &&
++         (submission->flags & ~VAMS_SUB_F_VERIFY_CRC)) ||
++        (submission->opcode != VAMS_OP_CRC32 && submission->flags)) {
+         return VAMS_ERR_INVALID_FLAGS;
+     }
+-    if (le32_to_cpu(submission->expected_crc) ||
+-        le32_to_cpu(submission->reserved0) ||
++    if ((submission->opcode != VAMS_OP_CRC32 ||
++         !(submission->flags & VAMS_SUB_F_VERIFY_CRC)) &&
++        le32_to_cpu(submission->expected_crc)) {
++        return VAMS_ERR_RESERVED_NONZERO;
++    }
++    if (le32_to_cpu(submission->reserved0) ||
+         le64_to_cpu(submission->reserved1) ||
+         le64_to_cpu(submission->reserved2)) {
+         return VAMS_ERR_RESERVED_NONZERO;
+@@ -328,6 +335,17 @@ static uint16_t vams_pcie_validate_command(
+             return VAMS_ERR_INVALID_ADDRESS;
+         }
+     }
++    if (submission->opcode == VAMS_OP_CRC32) {
++        if (!length || length > 0x01000000) {
++            return VAMS_ERR_INVALID_LENGTH;
++        }
++        if (vams_pcie_range_overflows(source, length)) {
++            return VAMS_ERR_ADDRESS_OVERFLOW;
++        }
++        if (!source || destination) {
++            return VAMS_ERR_INVALID_ADDRESS;
++        }
++    }
+     return VAMS_ERR_NONE;
+ }
+ 
+@@ -361,6 +379,24 @@ static void vams_pcie_complete_dma_error(struct vams_completion *completion,
+     completion->result_crc = 0;
+ }
+ 
++static uint32_t vams_pcie_crc32(const uint8_t *buffer, uint32_t length)
++{
++    uint32_t crc = UINT32_MAX;
++    uint32_t index;
++
++    for (index = 0; index < length; index++) {
++        unsigned int bit;
++
++        crc ^= buffer[index];
++        for (bit = 0; bit < 8; bit++) {
++            uint32_t mask = 0U - (crc & 1U);
++
++            crc = (crc >> 1) ^ (UINT32_C(0xedb88320) & mask);
++        }
++    }
++    return ~crc;
++}
++
+ static void vams_pcie_execute_payload(
+     VamsPcieState *s, const struct vams_submission *submission,
+     struct vams_completion *completion)
+@@ -372,7 +408,8 @@ static void vams_pcie_execute_payload(
+ 
+     if (le16_to_cpu(completion->status) != VAMS_STATUS_SUCCESS ||
+         (submission->opcode != VAMS_OP_MEM_COPY &&
+-         submission->opcode != VAMS_OP_MEM_FILL)) {
++         submission->opcode != VAMS_OP_MEM_FILL &&
++         submission->opcode != VAMS_OP_CRC32)) {
+         return;
+     }
+     if (vams_pcie_validate_command(submission) != VAMS_ERR_NONE) {
+@@ -395,6 +432,21 @@ static void vams_pcie_execute_payload(
+     if (submission->opcode == VAMS_OP_MEM_FILL) {
+         memset(buffer, buffer[0], length);
+     }
++    if (submission->opcode == VAMS_OP_CRC32) {
++        uint32_t crc = vams_pcie_crc32(buffer, length);
++
++        g_free(buffer);
++        completion->result_crc = cpu_to_le32(crc);
++        if ((submission->flags & VAMS_SUB_F_VERIFY_CRC) &&
++            crc != le32_to_cpu(submission->expected_crc)) {
++            completion->status = cpu_to_le16(VAMS_STATUS_FAILED);
++            completion->error_code = cpu_to_le16(VAMS_ERR_CRC_MISMATCH);
++            completion->bytes_processed = 0;
++            return;
++        }
++        completion->bytes_processed = cpu_to_le32(length);
++        return;
++    }
+     result = pci_dma_write(pdev, le64_to_cpu(submission->destination_dma),
+                            buffer, length);
+     g_free(buffer);

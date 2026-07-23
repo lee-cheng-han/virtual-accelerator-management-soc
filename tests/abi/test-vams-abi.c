@@ -4,6 +4,7 @@
 
 #include "vams_abi.h"
 
+_Static_assert(VAMS_SUB_F_VERIFY_CRC == 1U, "CRC verification flag");
 _Static_assert(sizeof(struct vams_submission) == 64, "submission size");
 _Static_assert(offsetof(struct vams_submission, version) == 0x00, "version");
 _Static_assert(offsetof(struct vams_submission, command_id) == 0x04, "id");

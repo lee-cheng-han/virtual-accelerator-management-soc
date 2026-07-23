@@ -22,6 +22,7 @@ OUTPUTS = {
 def constants(schema: dict[str, object]) -> str:
     groups = (
         ("VAMS_OP_", schema["opcodes"]),
+        ("VAMS_SUB_F_", schema["submission_flags"]),
         ("VAMS_STATUS_", schema["completion_status"]),
         ("VAMS_ERR_", schema["error_codes"]),
     )

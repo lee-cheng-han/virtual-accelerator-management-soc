@@ -12,8 +12,8 @@ The PCI model retains direct NOP validation as a standalone test fallback. In
 the integrated path it instead DMA-fetches a descriptor and sends it over a
 private chardev to the `vams_riscv` command portal. Real Zephyr firmware owns
 the normative validation order and completion policy; the returned completion
-is DMA-written into the host CQ before tail publication. `MEM_COPY` and `MEM_FILL` are now
-only implemented payload opcode and is documented separately.
+is DMA-written into the host CQ before tail publication. `MEM_COPY`, `MEM_FILL`,
+and `CRC32` are the implemented payload opcodes and are documented separately.
 
 ## Generated ABI
 

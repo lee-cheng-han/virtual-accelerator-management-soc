@@ -59,10 +59,10 @@ words, executes a full memory fence, and only then acknowledges bit 0. It fills
 all completion words, executes a full fence, and only then publishes bit 1.
 Overwrite and protocol bits are sticky W1C diagnostics.
 
-The Zephyr command task polls for bit 0, validates NOP, MEM_COPY, or MEM_FILL using the
-normative first-error order, and publishes a result with the original ID and
-cookie. The
-`vams-mgmt.test-command` property injects a valid NOP with value `1` or an
+The Zephyr command task polls for bit 0 and validates NOP, MEM_COPY, MEM_FILL,
+or CRC32 using the normative first-error order, then publishes a result with the
+original ID and cookie. The `vams-mgmt.test-command` property injects a valid
+NOP with value `1` or an
 unsupported-version NOP with value `2` at cold boot. This is deterministic test
 injection only. The optional `command-chardev` property now drives the same
 ownership registers from the PCI queue controller in the dual-QEMU test.

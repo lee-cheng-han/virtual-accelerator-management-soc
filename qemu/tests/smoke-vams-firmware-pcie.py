@@ -2,6 +2,7 @@
 """Exercise PCI SQ/CQ DMA through the real Zephyr command service."""
 
 import argparse
+import binascii
 import os
 import select
 import shutil
@@ -21,6 +22,8 @@ PAYLOAD_LENGTH = 4097
 FILL_SOURCE = 0x121001
 FILL_DESTINATION = 0x140007
 FILL_LENGTH = 4111
+CRC_SOURCE = 0x150009
+CRC_LENGTH = 4123
 SUBMISSION = struct.Struct("<HBBIQQIIQIIQQ")
 COMPLETION = struct.Struct("<IHHIIQQ")
 
@@ -143,10 +146,10 @@ def configure_queues(qtest):
 
 
 def submission(version, command_id, cookie, opcode=0, source=0,
-               destination=0, length=0):
+               destination=0, length=0, flags=0, expected_crc=0):
     return SUBMISSION.pack(
-        version, opcode, 0, command_id, source, destination, length, 0,
-        cookie, 0, 0, 0, 0
+        version, opcode, flags, command_id, source, destination, length, 0,
+        cookie, expected_crc, 0, 0, 0
     )
 
 
@@ -453,6 +456,84 @@ def main():
                         qtest, slot, (command_id, 2, error, 0, 0, cookie)
                     )
                     qtest.write32(BAR0 + 0x214, tail)
+
+                crc_payload = bytes(
+                    ((index * 73) + 19) & 0xFF
+                    for index in range(CRC_LENGTH)
+                )
+                expected_crc = binascii.crc32(crc_payload) & 0xFFFFFFFF
+                qtest.write(CRC_SOURCE, crc_payload)
+
+                crc_cases = (
+                    (14, 15, 0xCC320001, 0xE00000000000000E,
+                     0, 0, 0, CRC_LENGTH, expected_crc),
+                    (15, 0, 0xCC320002, 0xF00000000000000F,
+                     1, expected_crc, 0, CRC_LENGTH, expected_crc),
+                    (0, 1, 0xCC320003, 0x0100000000000010,
+                     1, expected_crc ^ 0xFFFFFFFF, 20, 0, expected_crc),
+                )
+                for slot, tail, command_id, cookie, flags, check_crc, \
+                        error, bytes_done, result_crc in crc_cases:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=3,
+                            source=CRC_SOURCE, length=CRC_LENGTH, flags=flags,
+                            expected_crc=check_crc,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot,
+                        (command_id, 2 if error else 0, error,
+                         bytes_done, result_crc, cookie),
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                invalid_crcs = (
+                    (1, 2, 0xCC320004, 0x0200000000000011,
+                     CRC_SOURCE, 0, CRC_LENGTH, 2, 0, 3),
+                    (2, 3, 0xCC320005, 0x0300000000000012,
+                     CRC_SOURCE, 0, CRC_LENGTH, 0, expected_crc, 4),
+                    (3, 4, 0xCC320006, 0x0400000000000013,
+                     CRC_SOURCE, FILL_DESTINATION, CRC_LENGTH, 0, 0, 9),
+                    (4, 5, 0xCC320007, 0x0500000000000014,
+                     CRC_SOURCE, 0, 0, 0, 0, 6),
+                    (5, 6, 0xCC320008, 0x0600000000000015,
+                     (1 << 64) - 32, 0, 64, 0, 0, 8),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        length, flags, check_crc, error in invalid_crcs:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=3, source=source,
+                            destination=destination, length=length,
+                            flags=flags, expected_crc=check_crc,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 1, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                crc_dma_cookie = 0x0700000000000016
+                qtest.write(
+                    SQ_BASE + 6 * SUBMISSION.size,
+                    submission(
+                        1, 0xCC320009, crc_dma_cookie, opcode=3,
+                        source=0x40000000, length=64,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 7)
+                wait_for_completion(qtest, 7)
+                check_completion(
+                    qtest, 6, (0xCC320009, 2, 16, 0, 0, crc_dma_cookie)
+                )
+                qtest.write32(BAR0 + 0x214, 7)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -501,6 +582,24 @@ def main():
                 "cookie=0xc00000000000000c",
                 "Command: id=0xf1110006 status=0 error=0 "
                 "cookie=0xd00000000000000d",
+                "Command: id=0xcc320001 status=0 error=0 "
+                "cookie=0xe00000000000000e",
+                "Command: id=0xcc320002 status=0 error=0 "
+                "cookie=0xf00000000000000f",
+                "Command: id=0xcc320003 status=0 error=0 "
+                "cookie=0x0100000000000010",
+                "Command: id=0xcc320004 status=1 error=3 "
+                "cookie=0x0200000000000011",
+                "Command: id=0xcc320005 status=1 error=4 "
+                "cookie=0x0300000000000012",
+                "Command: id=0xcc320006 status=1 error=9 "
+                "cookie=0x0400000000000013",
+                "Command: id=0xcc320007 status=1 error=6 "
+                "cookie=0x0500000000000014",
+                "Command: id=0xcc320008 status=1 error=8 "
+                "cookie=0x0600000000000015",
+                "Command: id=0xcc320009 status=0 error=0 "
+                "cookie=0x0700000000000016",
             )
             if not all(line in firmware_output for line in required):
                 print(firmware_output, file=sys.stderr)
@@ -513,9 +612,9 @@ def main():
             print(firmware_output, file=sys.stderr)
             return return_code
 
-    print("VAMS firmware-owned MEM_COPY/MEM_FILL: "
+    print("VAMS firmware-owned MEM_COPY/MEM_FILL/CRC32: "
           "data=PASS validation=PASS DMA-errors=PASS")
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=17 host=16 PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=26 host=25 PASS")
     return 0
 
 
