@@ -10,9 +10,8 @@ model to touch payload memory.
 
 The current engine is deliberately synchronous and single-command. It supports
 lengths from 1 byte through 16 MiB and byte-aligned, nonzero, distinct,
-non-overlapping source and destination ranges. Vector add,
-scatter/gather, concurrent engine work, and Linux userspace payload submission
-are not implemented.
+non-overlapping source and destination ranges. Scatter/gather, concurrent engine
+work, and Linux userspace payload submission are not implemented.
 
 ## Validation and ownership
 

@@ -1,0 +1,99 @@
+Subject: [PATCH] hw/misc: add VAMS vector-add engine
+
+Authorize VECTOR_ADD through the firmware bridge and execute element-wise
+little-endian uint32 addition through PCI DMA. Snapshot both operands before
+modifying the destination, preserve modulo arithmetic, validate alignment and
+range separation, and report operand-read and destination-write failures.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -280,7 +280,8 @@ static uint16_t vams_pcie_validate_command(
+     if (submission->opcode != VAMS_OP_NOP &&
+         submission->opcode != VAMS_OP_MEM_COPY &&
+         submission->opcode != VAMS_OP_MEM_FILL &&
+-        submission->opcode != VAMS_OP_CRC32) {
++        submission->opcode != VAMS_OP_CRC32 &&
++        submission->opcode != VAMS_OP_VECTOR_ADD) {
+         return VAMS_ERR_INVALID_OPCODE;
+     }
+     if ((submission->opcode == VAMS_OP_CRC32 &&
+@@ -346,6 +347,25 @@ static uint16_t vams_pcie_validate_command(
+             return VAMS_ERR_INVALID_ADDRESS;
+         }
+     }
++    if (submission->opcode == VAMS_OP_VECTOR_ADD) {
++        if (length < sizeof(uint32_t) || length > 0x01000000 ||
++            (length & (sizeof(uint32_t) - 1))) {
++            return VAMS_ERR_INVALID_LENGTH;
++        }
++        if (!source || !destination) {
++            return VAMS_ERR_INVALID_ADDRESS;
++        }
++        if ((source | destination) & (sizeof(uint32_t) - 1)) {
++            return VAMS_ERR_INVALID_ALIGNMENT;
++        }
++        if (vams_pcie_range_overflows(source, length) ||
++            vams_pcie_range_overflows(destination, length)) {
++            return VAMS_ERR_ADDRESS_OVERFLOW;
++        }
++        if (vams_pcie_ranges_overlap(source, destination, length)) {
++            return VAMS_ERR_INVALID_ADDRESS;
++        }
++    }
+     return VAMS_ERR_NONE;
+ }
+ 
+@@ -404,12 +424,14 @@ static void vams_pcie_execute_payload(
+     PCIDevice *pdev = PCI_DEVICE(s);
+     uint32_t length = le32_to_cpu(submission->length);
+     uint8_t *buffer;
++    uint8_t *destination_buffer;
+     MemTxResult result;
+ 
+     if (le16_to_cpu(completion->status) != VAMS_STATUS_SUCCESS ||
+         (submission->opcode != VAMS_OP_MEM_COPY &&
+          submission->opcode != VAMS_OP_MEM_FILL &&
+-         submission->opcode != VAMS_OP_CRC32)) {
++         submission->opcode != VAMS_OP_CRC32 &&
++         submission->opcode != VAMS_OP_VECTOR_ADD)) {
+         return;
+     }
+     if (vams_pcie_validate_command(submission) != VAMS_ERR_NONE) {
+@@ -447,6 +469,35 @@ static void vams_pcie_execute_payload(
+         completion->bytes_processed = cpu_to_le32(length);
+         return;
+     }
++    if (submission->opcode == VAMS_OP_VECTOR_ADD) {
++        uint32_t index;
++
++        destination_buffer = g_try_malloc(length);
++        if (!destination_buffer) {
++            g_free(buffer);
++            vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
++            return;
++        }
++        result = pci_dma_read(pdev,
++                              le64_to_cpu(submission->destination_dma),
++                              destination_buffer, length);
++        if (result != MEMTX_OK) {
++            g_free(destination_buffer);
++            g_free(buffer);
++            vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_READ);
++            return;
++        }
++        for (index = 0; index < length; index += sizeof(uint32_t)) {
++            uint32_t source_value = ldl_le_p(buffer + index);
++            uint32_t destination_value =
++                ldl_le_p(destination_buffer + index);
++            uint32_t sum = source_value + destination_value;
++
++            stl_le_p(destination_buffer + index, sum);
++        }
++        g_free(buffer);
++        buffer = destination_buffer;
++    }
+     result = pci_dma_write(pdev, le64_to_cpu(submission->destination_dma),
+                            buffer, length);
+     g_free(buffer);

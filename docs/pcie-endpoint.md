@@ -4,9 +4,9 @@
 
 The QEMU type `vams-pcie` is a PCI Express processing-accelerator endpoint. It
 provides the host-visible identity/control foundation plus one coherent command
-queue. The private dual-QEMU bridge and firmware-owned `MEM_COPY`, `MEM_FILL`,
-and `CRC32` paths now work in integration tests. Vector add, host payload UAPI,
-and asynchronous engine execution remain unavailable.
+queue. The private dual-QEMU bridge and all firmware-owned v1 payload operations
+now work in integration tests. Host payload UAPI and asynchronous engine
+execution remain unavailable.
 
 | PCI field | Value |
 |---|---:|
@@ -53,8 +53,7 @@ invalid configuration requests set their distinct normative error bits.
 
 Device ENABLE requires configured enabled SQ/CQ registers and PCI bus mastering.
 The DMA capability covers descriptor/completion transport and the implemented
-copy/fill/CRC32 payload operations; it does not imply support for every defined
-opcode.
+copy, fill, CRC32, and vector-add payload operations.
 
 ## Interrupt and reset behavior
 

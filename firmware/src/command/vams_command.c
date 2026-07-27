@@ -37,7 +37,8 @@ static uint16_t vams_validate_command(const struct vams_submission *submission)
 		return VAMS_ERR_UNSUPPORTED_VERSION;
 	}
 	if (opcode != VAMS_OP_NOP && opcode != VAMS_OP_MEM_COPY &&
-	    opcode != VAMS_OP_MEM_FILL && opcode != VAMS_OP_CRC32) {
+	    opcode != VAMS_OP_MEM_FILL && opcode != VAMS_OP_CRC32 &&
+	    opcode != VAMS_OP_VECTOR_ADD) {
 		return VAMS_ERR_INVALID_OPCODE;
 	}
 	if ((opcode == VAMS_OP_CRC32 &&
@@ -96,6 +97,26 @@ static uint16_t vams_validate_command(const struct vams_submission *submission)
 			return VAMS_ERR_ADDRESS_OVERFLOW;
 		}
 		if (source == 0U || destination != 0U) {
+			return VAMS_ERR_INVALID_ADDRESS;
+		}
+	}
+	if (opcode == VAMS_OP_VECTOR_ADD) {
+		if (length < sizeof(uint32_t) ||
+		    length > VAMS_MAX_TRANSFER_SIZE ||
+		    (length & (sizeof(uint32_t) - 1U)) != 0U) {
+			return VAMS_ERR_INVALID_LENGTH;
+		}
+		if (source == 0U || destination == 0U) {
+			return VAMS_ERR_INVALID_ADDRESS;
+		}
+		if (((source | destination) & (sizeof(uint32_t) - 1U)) != 0U) {
+			return VAMS_ERR_INVALID_ALIGNMENT;
+		}
+		if (vams_range_overflows(source, length) ||
+		    vams_range_overflows(destination, length)) {
+			return VAMS_ERR_ADDRESS_OVERFLOW;
+		}
+		if (vams_ranges_overlap(source, destination, length)) {
 			return VAMS_ERR_INVALID_ADDRESS;
 		}
 	}

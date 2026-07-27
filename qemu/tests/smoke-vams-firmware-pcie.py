@@ -4,6 +4,7 @@
 import argparse
 import binascii
 import os
+import re
 import select
 import shutil
 import struct
@@ -24,6 +25,9 @@ FILL_DESTINATION = 0x140007
 FILL_LENGTH = 4111
 CRC_SOURCE = 0x150009
 CRC_LENGTH = 4123
+VECTOR_SOURCE = 0x16000C
+VECTOR_DESTINATION = 0x170014
+VECTOR_LENGTH = 4100
 SUBMISSION = struct.Struct("<HBBIQQIIQIIQQ")
 COMPLETION = struct.Struct("<IHHIIQQ")
 
@@ -534,6 +538,116 @@ def main():
                     qtest, 6, (0xCC320009, 2, 16, 0, 0, crc_dma_cookie)
                 )
                 qtest.write32(BAR0 + 0x214, 7)
+
+                vector_elements = VECTOR_LENGTH // 4
+                source_values = tuple(
+                    (index * 0x10203041) & 0xFFFFFFFF
+                    for index in range(vector_elements)
+                )
+                destination_values = tuple(
+                    (0xFFFFFFFF - index * 0x01010101) & 0xFFFFFFFF
+                    for index in range(vector_elements)
+                )
+                expected_values = tuple(
+                    (source_value + destination_value) & 0xFFFFFFFF
+                    for source_value, destination_value
+                    in zip(source_values, destination_values)
+                )
+                vector_format = f"<{vector_elements}I"
+                source_vector = struct.pack(vector_format, *source_values)
+                destination_vector = struct.pack(
+                    vector_format, *destination_values
+                )
+                expected_vector = struct.pack(vector_format, *expected_values)
+                vector_guard = bytes([0x96]) * 16
+                qtest.write(VECTOR_SOURCE, source_vector)
+                qtest.write(
+                    VECTOR_DESTINATION - len(vector_guard),
+                    vector_guard + destination_vector + vector_guard,
+                )
+                vector_cookie = 0x0800000000000017
+                qtest.write(
+                    SQ_BASE + 7 * SUBMISSION.size,
+                    submission(
+                        1, 0xADD40001, vector_cookie, opcode=4,
+                        source=VECTOR_SOURCE, destination=VECTOR_DESTINATION,
+                        length=VECTOR_LENGTH,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 8)
+                wait_for_completion(qtest, 8)
+                check_completion(
+                    qtest, 7,
+                    (0xADD40001, 0, 0, VECTOR_LENGTH, 0, vector_cookie),
+                )
+                vector_result = qtest.read(
+                    VECTOR_DESTINATION, VECTOR_LENGTH
+                )
+                vector_before = qtest.read(
+                    VECTOR_DESTINATION - len(vector_guard), len(vector_guard)
+                )
+                vector_after = qtest.read(
+                    VECTOR_DESTINATION + VECTOR_LENGTH, len(vector_guard)
+                )
+                source_after = qtest.read(VECTOR_SOURCE, VECTOR_LENGTH)
+                if (vector_result != expected_vector or
+                        vector_before != vector_guard or
+                        vector_after != vector_guard or
+                        source_after != source_vector):
+                    raise AssertionError(
+                        "VECTOR_ADD arithmetic, source, or guard mismatch"
+                    )
+                qtest.write32(BAR0 + 0x214, 8)
+
+                invalid_vectors = (
+                    (8, 9, 0xADD40002, 0x0900000000000018,
+                     VECTOR_SOURCE, VECTOR_DESTINATION, 2, 6),
+                    (9, 10, 0xADD40003, 0x0A00000000000019,
+                     VECTOR_SOURCE + 1, VECTOR_DESTINATION, 4, 7),
+                    (10, 11, 0xADD40004, 0x0B0000000000001A,
+                     0, VECTOR_DESTINATION, 4, 9),
+                    (11, 12, 0xADD40005, 0x0C0000000000001B,
+                     (1 << 64) - 32, VECTOR_DESTINATION, 64, 8),
+                    (12, 13, 0xADD40006, 0x0D0000000000001C,
+                     VECTOR_SOURCE, VECTOR_SOURCE + 4, 64, 9),
+                )
+                for slot, tail, command_id, cookie, source, destination, \
+                        length, error in invalid_vectors:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=4, source=source,
+                            destination=destination, length=length,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 1, error, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
+
+                vector_dma_failures = (
+                    (13, 14, 0xADD40007, 0x0E0000000000001D,
+                     0x40000000, VECTOR_DESTINATION),
+                    (14, 15, 0xADD40008, 0x0F0000000000001E,
+                     VECTOR_SOURCE, 0x40000000),
+                )
+                for slot, tail, command_id, cookie, source, destination \
+                        in vector_dma_failures:
+                    qtest.write(
+                        SQ_BASE + slot * SUBMISSION.size,
+                        submission(
+                            1, command_id, cookie, opcode=4, source=source,
+                            destination=destination, length=64,
+                        ),
+                    )
+                    qtest.write32(BAR0 + 0x114, tail)
+                    wait_for_completion(qtest, tail)
+                    check_completion(
+                        qtest, slot, (command_id, 2, 16, 0, 0, cookie)
+                    )
+                    qtest.write32(BAR0 + 0x214, tail)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -547,6 +661,11 @@ def main():
         with open(firmware_log_path, "r", encoding="utf-8") as stream:
             firmware_output = stream.read()
         if return_code == 0:
+            command_output = re.sub(
+                r"(?:Telemetry|Heartbeat):[^\r\n]*(?:\r?\n|$)",
+                "",
+                firmware_output,
+            )
             required = (
                 "Command: id=0x10203040 status=0 error=0 "
                 "cookie=0x1122334455667788",
@@ -600,10 +719,26 @@ def main():
                 "cookie=0x0600000000000015",
                 "Command: id=0xcc320009 status=0 error=0 "
                 "cookie=0x0700000000000016",
+                "Command: id=0xadd40001 status=0 error=0 "
+                "cookie=0x0800000000000017",
+                "Command: id=0xadd40002 status=1 error=6 "
+                "cookie=0x0900000000000018",
+                "Command: id=0xadd40003 status=1 error=7 "
+                "cookie=0x0a00000000000019",
+                "Command: id=0xadd40004 status=1 error=9 "
+                "cookie=0x0b0000000000001a",
+                "Command: id=0xadd40005 status=1 error=8 "
+                "cookie=0x0c0000000000001b",
+                "Command: id=0xadd40006 status=1 error=9 "
+                "cookie=0x0d0000000000001c",
+                "Command: id=0xadd40007 status=0 error=0 "
+                "cookie=0x0e0000000000001d",
+                "Command: id=0xadd40008 status=0 error=0 "
+                "cookie=0x0f0000000000001e",
             )
-            if not all(line in firmware_output for line in required):
+            if not all(line in command_output for line in required):
                 print(firmware_output, file=sys.stderr)
-                print("firmware did not report both bridged commands",
+                print("firmware did not report all expected bridged commands",
                       file=sys.stderr)
                 return_code = 1
         if return_code != 0:
@@ -612,9 +747,9 @@ def main():
             print(firmware_output, file=sys.stderr)
             return return_code
 
-    print("VAMS firmware-owned MEM_COPY/MEM_FILL/CRC32: "
+    print("VAMS firmware-owned MEM_COPY/MEM_FILL/CRC32/VECTOR_ADD: "
           "data=PASS validation=PASS DMA-errors=PASS")
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=26 host=25 PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=34 host=33 PASS")
     return 0
 
 

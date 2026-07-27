@@ -30,12 +30,12 @@ reference model compares QEMU ownership, backpressure, wraparound, interrupt,
 error, completion, and reset state after every randomized operation. The
 dual-QEMU integration now DMA-stages PCI submissions through the private portal,
 runs real Zephyr validation, and DMA-publishes firmware completions. Basic
-queue-reset stale-result suppression is tested. Firmware now validates
-`MEM_COPY`, `MEM_FILL`, and `CRC32`, and the QEMU engine performs exact checked
-PCI payload DMA with guarded data-integrity and independently verified CRC
-coverage. Vector add, asynchronous engine execution, fuzzing, and throughput
-evidence remain before this gate closes. Broader timeout, disconnect, and reset
-recovery remains in the recovery gate.
+queue-reset stale-result suppression is tested. Firmware now validates every v1
+payload opcode, and the QEMU engine performs exact checked PCI payload DMA with
+guarded copy/fill/vector data integrity and independently verified CRC coverage.
+Asynchronous engine execution, fuzzing, and throughput evidence remain before
+this gate closes. Broader timeout, disconnect, and reset recovery remains in the
+recovery gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a

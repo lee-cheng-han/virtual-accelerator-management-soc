@@ -139,7 +139,7 @@ enum vams_opcode {
 | MEM_COPY | Source and destination nonzero, byte-aligned, distinct non-overlapping numeric ranges. | 1–16 MiB bytes; exact byte copy. CRC zero. | Read/write DMA, overflow, timeout, reset; never partial. |
 | MEM_FILL | Source points to one readable byte containing fill value; destination byte-aligned and nonzero. | 1–16 MiB destination bytes. CRC zero. | Source range is exactly 1 byte; write DMA, timeout, reset; never partial. |
 | CRC32 | Source nonzero and byte-aligned; destination must be zero. | 1–16 MiB. IEEE CRC-32: reflected polynomial `0xedb88320`, initial/final XOR `0xffffffff`; result in `result_crc`. | Read DMA; optional mismatch returns FAILED/CRC_MISMATCH and computed CRC; never partial. |
-| VECTOR_ADD | Source and destination nonzero and 4-byte aligned. Destination initially contains operand B and is overwritten by source A + B. Numeric ranges must not overlap. | 4–16 MiB, multiple of 4; little-endian `uint32_t` addition modulo 2^32. CRC zero. | Read/write DMA, alignment, timeout, reset; never partial. |
+| VECTOR_ADD | Source and destination nonzero and 4-byte aligned. Destination initially contains operand B and is overwritten by source A + B. Numeric ranges must not overlap. | 4 bytes–16 MiB, multiple of 4; little-endian `uint32_t` addition modulo 2^32. CRC zero. | Read/write DMA, alignment, timeout, reset; never partial. |
 
 Except CRC32 with VERIFY_CRC, flags are zero. DMA addresses that QEMU cannot
 access produce `INVALID_ADDRESS` if rejected before dispatch or the directional

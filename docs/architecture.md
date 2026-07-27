@@ -48,13 +48,14 @@ deterministic randomized sequences. Queue or device reset marks an in-flight
 bridge result for discard, preventing a pre-reset firmware completion from
 entering the new CQ generation.
 
-For `MEM_COPY`, `MEM_FILL`, and `CRC32`, Zephyr validates version, opcode, flags,
-reserved fields, timeout, length, overflow, and required addresses before
-authorizing execution. Copy additionally rejects overlapping ranges. The PCI
-model rechecks the hardware safety conditions and constructs a bounded private
-payload buffer. Copy and fill DMA-write their destination; CRC32 returns the
-IEEE result in the completion and can compare it with a caller-provided value.
-Copy and CRC32 read the full source; fill reads exactly one source byte.
+For every v1 payload opcode, Zephyr validates version, opcode, flags, reserved
+fields, timeout, length, overflow, and required addresses before authorizing
+execution. Copy and vector add additionally reject overlapping ranges; vector
+add requires four-byte alignment. The PCI model rechecks the hardware safety
+conditions and constructs bounded private payload buffers. Copy and fill
+DMA-write their destination; CRC32 returns the IEEE result in the completion;
+vector add snapshots both operands and performs little-endian `uint32_t`
+addition modulo 2³².
 
 ## Address spaces
 
