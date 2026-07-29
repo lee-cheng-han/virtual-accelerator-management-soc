@@ -1,0 +1,262 @@
+Subject: [PATCH] hw/misc: add VAMS asynchronous engine deadlines
+
+Move firmware-authorized payload execution behind a virtual-time engine timer.
+Expose BUSY state, enforce descriptor deadlines before payload access, retain
+the active command and timer in migration state, and cancel engine work on
+queue or device reset so stale callbacks cannot publish into a new generation.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -27,6 +27,10 @@
+ #define VAMS_MSIX_BAR 1
+ #define VAMS_PCIE_CAP_OFFSET 0x80
+ #define VAMS_DEVICE_RESET_DELAY_MS 1
++#define VAMS_NANOSECONDS_PER_MILLISECOND INT64_C(1000000)
++#define VAMS_ENGINE_EXECUTION_NS \
++    (2 * VAMS_NANOSECONDS_PER_MILLISECOND)
++#define VAMS_DEFAULT_TIMEOUT_MS 30000
+ 
+ enum {
+     VAMS_REG_DEVICE_ID = 0x000,
+@@ -69,6 +73,7 @@ enum {
+     VAMS_CAP_POLLING_CQ = BIT(5),
+     VAMS_STATUS_READY = BIT(0),
+     VAMS_STATUS_QUEUES_READY = BIT(2),
++    VAMS_STATUS_ENGINE_BUSY = BIT(3),
+     VAMS_STATUS_RESETTING = BIT(4),
+     VAMS_CONTROL_ENABLE = BIT(0),
+     VAMS_CONTROL_RESET = BIT(1),
+@@ -103,6 +108,7 @@ struct VamsPcieState {
+     PCIDevice parent_obj;
+     MemoryRegion bar0;
+     QEMUTimer *reset_timer;
++    QEMUTimer *engine_timer;
+ 
+     uint32_t device_status;
+     uint32_t device_control;
+@@ -135,6 +141,10 @@ struct VamsPcieState {
+     uint32_t bridge_completion_pos;
+     bool bridge_inflight;
+     bool bridge_discard_completion;
++    int64_t command_deadline_ns;
++    int64_t engine_finish_ns;
++    uint32_t engine_generation;
++    bool engine_inflight;
+ };
+ 
+ static void vams_pcie_notify(VamsPcieState *s, uint32_t pending)
+@@ -234,9 +244,17 @@ static void vams_pcie_cancel_bridge_request(VamsPcieState *s)
+     }
+ }
+ 
++static void vams_pcie_cancel_engine(VamsPcieState *s)
++{
++    timer_del(s->engine_timer);
++    s->engine_inflight = false;
++    s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
++}
++
+ static void vams_pcie_queue_reset(VamsPcieState *s)
+ {
+     vams_pcie_cancel_bridge_request(s);
++    vams_pcie_cancel_engine(s);
+     s->device_control &= ~VAMS_CONTROL_ENABLE;
+     s->device_status &= ~VAMS_STATUS_QUEUES_READY;
+     s->sq_head = 0;
+@@ -508,6 +526,71 @@ static void vams_pcie_execute_payload(
+     completion->bytes_processed = cpu_to_le32(length);
+ }
+ 
++static bool vams_pcie_is_payload_opcode(uint8_t opcode)
++{
++    return opcode == VAMS_OP_MEM_COPY || opcode == VAMS_OP_MEM_FILL ||
++           opcode == VAMS_OP_CRC32 || opcode == VAMS_OP_VECTOR_ADD;
++}
++
++static int64_t vams_pcie_command_deadline_ns(
++    const struct vams_submission *submission)
++{
++    uint32_t timeout_ms = le32_to_cpu(submission->timeout_ms);
++
++    if (!timeout_ms) {
++        timeout_ms = VAMS_DEFAULT_TIMEOUT_MS;
++    }
++    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++           (int64_t)timeout_ms * VAMS_NANOSECONDS_PER_MILLISECOND;
++}
++
++static void vams_pcie_engine_complete(void *opaque)
++{
++    VamsPcieState *s = opaque;
++    struct vams_completion *completion =
++        (struct vams_completion *)s->bridge_completion;
++
++    g_assert(s->engine_inflight);
++    s->engine_inflight = false;
++    s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
++
++    if (s->engine_generation != s->reset_generation) {
++        return;
++    }
++    if (s->command_deadline_ns < s->engine_finish_ns) {
++        completion->status = cpu_to_le16(VAMS_STATUS_TIMED_OUT);
++        completion->error_code = cpu_to_le16(VAMS_ERR_TIMEOUT);
++        completion->bytes_processed = 0;
++        completion->result_crc = 0;
++    } else {
++        vams_pcie_execute_payload(s, &s->bridge_submission.command,
++                                  completion);
++    }
++    if (s->engine_generation != s->reset_generation) {
++        return;
++    }
++    if (!vams_pcie_publish_completion(s, completion)) {
++        return;
++    }
++    vams_pcie_process_sq(s);
++}
++
++static void vams_pcie_schedule_engine(VamsPcieState *s)
++{
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t expiry;
++
++    g_assert(!s->engine_inflight);
++    g_assert(vams_pcie_is_payload_opcode(s->bridge_submission.command.opcode));
++
++    s->engine_finish_ns = now + VAMS_ENGINE_EXECUTION_NS;
++    s->engine_generation = s->reset_generation;
++    s->engine_inflight = true;
++    s->device_status |= VAMS_STATUS_ENGINE_BUSY;
++    expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
++    timer_mod_ns(s->engine_timer, MAX(expiry, now));
++}
++
+ static int vams_pcie_bridge_can_receive(void *opaque)
+ {
+     VamsPcieState *s = opaque;
+@@ -538,9 +621,13 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+         return;
+     }
+     s->bridge_inflight = false;
+-    vams_pcie_execute_payload(
+-        s, &s->bridge_submission.command,
+-        (struct vams_completion *)s->bridge_completion);
++    if (le16_to_cpu(
++            ((struct vams_completion *)s->bridge_completion)->status) ==
++            VAMS_STATUS_SUCCESS &&
++        vams_pcie_is_payload_opcode(s->bridge_submission.command.opcode)) {
++        vams_pcie_schedule_engine(s);
++        return;
++    }
+     vams_pcie_publish_completion(
+         s, (const struct vams_completion *)s->bridge_completion);
+     vams_pcie_process_sq(s);
+@@ -570,7 +657,8 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+     }
+ 
+     while (s->sq_head != s->sq_tail && !vams_pcie_cq_full(s) &&
+-           !s->bridge_inflight && !s->bridge_discard_completion) {
++           !s->bridge_inflight && !s->bridge_discard_completion &&
++           !s->engine_inflight) {
+         struct vams_submission submission;
+         struct vams_completion completion = { 0 };
+         uint16_t error_code;
+@@ -590,6 +678,8 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+ 
+             s->bridge_inflight = true;
+             s->bridge_submission.command = submission;
++            s->command_deadline_ns =
++                vams_pcie_command_deadline_ns(&submission);
+             written = qemu_chr_fe_write_all(
+                 &s->command_chr, (const uint8_t *)&submission,
+                 sizeof(submission));
+@@ -615,7 +705,15 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+         completion.device_timestamp = cpu_to_le64(
+             qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+ 
+-        vams_pcie_execute_payload(s, &submission, &completion);
++        if (error_code == VAMS_ERR_NONE &&
++            vams_pcie_is_payload_opcode(submission.opcode)) {
++            s->bridge_submission.command = submission;
++            memcpy(s->bridge_completion, &completion, sizeof(completion));
++            s->command_deadline_ns =
++                vams_pcie_command_deadline_ns(&submission);
++            vams_pcie_schedule_engine(s);
++            return;
++        }
+ 
+         if (!vams_pcie_publish_completion(s, &completion)) {
+             return;
+@@ -641,6 +739,7 @@ static void vams_pcie_device_reset(VamsPcieState *s)
+     }
+ 
+     vams_pcie_cancel_bridge_request(s);
++    vams_pcie_cancel_engine(s);
+     s->device_control = 0;
+     s->device_status = VAMS_STATUS_RESETTING;
+     s->error_status &= VAMS_ERROR_FATAL;
+@@ -1014,12 +1113,13 @@ static const MemoryRegionOps vams_pcie_bar0_ops = {
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 4,
++    .version_id = 5,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+         VMSTATE_MSIX(parent_obj, VamsPcieState),
+         VMSTATE_TIMER_PTR(reset_timer, VamsPcieState),
++        VMSTATE_TIMER_PTR_V(engine_timer, VamsPcieState, 5),
+         VMSTATE_UINT32(device_status, VamsPcieState),
+         VMSTATE_UINT32(device_control, VamsPcieState),
+         VMSTATE_UINT32(error_status, VamsPcieState),
+@@ -1048,6 +1148,10 @@ static const VMStateDescription vams_pcie_vmstate = {
+         VMSTATE_UINT32_V(bridge_completion_pos, VamsPcieState, 3),
+         VMSTATE_BOOL_V(bridge_inflight, VamsPcieState, 3),
+         VMSTATE_BOOL_V(bridge_discard_completion, VamsPcieState, 3),
++        VMSTATE_INT64_V(command_deadline_ns, VamsPcieState, 5),
++        VMSTATE_INT64_V(engine_finish_ns, VamsPcieState, 5),
++        VMSTATE_UINT32_V(engine_generation, VamsPcieState, 5),
++        VMSTATE_BOOL_V(engine_inflight, VamsPcieState, 5),
+         VMSTATE_END_OF_LIST()
+     },
+ };
+@@ -1057,6 +1161,7 @@ static void vams_pcie_reset(DeviceState *dev)
+     VamsPcieState *s = VAMS_PCIE(dev);
+ 
+     timer_del(s->reset_timer);
++    timer_del(s->engine_timer);
+     s->device_status = VAMS_STATUS_READY;
+     s->device_control = 0;
+     s->error_status = 0;
+@@ -1083,6 +1188,10 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->bridge_completion_pos = 0;
+     s->bridge_inflight = false;
+     s->bridge_discard_completion = false;
++    s->command_deadline_ns = 0;
++    s->engine_finish_ns = 0;
++    s->engine_generation = 0;
++    s->engine_inflight = false;
+ }
+ 
+ static void vams_pcie_realize(PCIDevice *pdev, Error **errp)
+@@ -1143,6 +1252,8 @@ static void vams_pcie_init(Object *obj)
+     PCI_DEVICE(obj)->cap_present |= QEMU_PCI_CAP_EXPRESS;
+     s->reset_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                   vams_pcie_reset_complete, s);
++    s->engine_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
++                                   vams_pcie_engine_complete, s);
+ }
+ 
+ static void vams_pcie_finalize(Object *obj)
+@@ -1150,6 +1261,7 @@ static void vams_pcie_finalize(Object *obj)
+     VamsPcieState *s = VAMS_PCIE(obj);
+ 
+     timer_free(s->reset_timer);
++    timer_free(s->engine_timer);
+ }
+ 
+ static const Property vams_pcie_properties[] = {

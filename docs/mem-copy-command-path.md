@@ -8,10 +8,12 @@ bridge. Real Zephyr firmware applies the normative validation order and returns
 an authorization result. Only a successful firmware result permits the PCI
 model to touch payload memory.
 
-The current engine is deliberately synchronous and single-command. It supports
-lengths from 1 byte through 16 MiB and byte-aligned, nonzero, distinct,
-non-overlapping source and destination ranges. Scatter/gather, concurrent engine
-work, and Linux userspace payload submission are not implemented.
+The current engine is deliberately single-command. It supports lengths from 1
+byte through 16 MiB and byte-aligned, nonzero, distinct, non-overlapping source
+and destination ranges. Dispatch, deadlines, and reset cancellation use a
+virtual-time callback; payload DMA within that callback remains monolithic.
+Scatter/gather, concurrent engine work, and Linux userspace payload submission
+are not implemented.
 
 ## Validation and ownership
 
@@ -42,10 +44,9 @@ and destination DMA completes before the completion is written, CQ tail is
 advanced, or MSI-X is raised. Existing queue-reset logic discards a late
 firmware result from the prior generation before accepting new bridge work.
 
-The synchronous implementation is a correctness baseline, not a throughput
-claim. Later engine work will introduce chunked asynchronous DMA, deadlines,
-abort, telemetry, and deterministic race checkpoints without changing the v1
-descriptor contract.
+The implementation is a correctness baseline, not a throughput claim. Later
+engine work will introduce chunked DMA, an abort handshake, telemetry, and more
+deterministic race checkpoints without changing the v1 descriptor contract.
 
 ## Validation
 

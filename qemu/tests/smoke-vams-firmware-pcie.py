@@ -28,12 +28,24 @@ CRC_LENGTH = 4123
 VECTOR_SOURCE = 0x16000C
 VECTOR_DESTINATION = 0x170014
 VECTOR_LENGTH = 4100
+ASYNC_SOURCE = 0x180003
+ASYNC_DESTINATION = 0x190005
+ASYNC_LENGTH = 64
 SUBMISSION = struct.Struct("<HBBIQQIIQIIQQ")
 COMPLETION = struct.Struct("<IHHIIQQ")
 
 
 class QTest:
     def __init__(self, executable, command_socket, stderr):
+        command_options = (
+            [
+                "-chardev",
+                f"socket,id=command,path={command_socket},server=off",
+                "-device", "vams-pcie,addr=2,command-chardev=command",
+            ]
+            if command_socket is not None
+            else ["-device", "vams-pcie,addr=2"]
+        )
         self.process = subprocess.Popen(
             [
                 executable,
@@ -41,9 +53,7 @@ class QTest:
                 "-m", "64M",
                 "-display", "none",
                 "-nodefaults",
-                "-chardev",
-                f"socket,id=command,path={command_socket},server=off",
-                "-device", "vams-pcie,addr=2,command-chardev=command",
+                *command_options,
                 "-qtest", "stdio",
                 "-qtest-log", os.devnull,
             ],
@@ -90,6 +100,9 @@ class QTest:
 
     def out32(self, address, value):
         self.command(f"outl 0x{address:x} 0x{value:x}")
+
+    def clock_step(self, nanoseconds):
+        self.command(f"clock_step {nanoseconds}")
 
     def write(self, address, data):
         self.command(f"write 0x{address:x} {len(data)} 0x{data.hex()}")
@@ -150,10 +163,11 @@ def configure_queues(qtest):
 
 
 def submission(version, command_id, cookie, opcode=0, source=0,
-               destination=0, length=0, flags=0, expected_crc=0):
+               destination=0, length=0, flags=0, expected_crc=0,
+               timeout_ms=0):
     return SUBMISSION.pack(
-        version, opcode, flags, command_id, source, destination, length, 0,
-        cookie, expected_crc, 0, 0, 0
+        version, opcode, flags, command_id, source, destination, length,
+        timeout_ms, cookie, expected_crc, 0, 0, 0
     )
 
 
@@ -162,8 +176,18 @@ def wait_for_completion(qtest, expected_tail):
     while time.monotonic() < deadline:
         if qtest.read32(BAR0 + 0x210) == expected_tail:
             return
+        qtest.clock_step(2_000_000)
         time.sleep(0.01)
     raise RuntimeError(f"completion tail did not reach {expected_tail}")
+
+
+def wait_for_engine_busy(qtest):
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if qtest.read32(BAR0 + 0x01C) & (1 << 3):
+            return
+        time.sleep(0.01)
+    raise RuntimeError("engine did not enter BUSY state")
 
 
 def check_completion(qtest, slot, expected):
@@ -648,6 +672,81 @@ def main():
                         qtest, slot, (command_id, 2, 16, 0, 0, cookie)
                     )
                     qtest.write32(BAR0 + 0x214, tail)
+
+                async_source = bytes(
+                    ((index * 11) + 7) & 0xFF
+                    for index in range(ASYNC_LENGTH)
+                )
+                timeout_destination = bytes([0x5A]) * ASYNC_LENGTH
+                qtest.write(ASYNC_SOURCE, async_source)
+                qtest.write(ASYNC_DESTINATION, timeout_destination)
+                timeout_cookie = 0x100000000000001F
+                qtest.write(
+                    SQ_BASE + 15 * SUBMISSION.size,
+                    submission(
+                        1, 0xA51C0001, timeout_cookie, opcode=1,
+                        source=ASYNC_SOURCE,
+                        destination=ASYNC_DESTINATION,
+                        length=ASYNC_LENGTH,
+                        timeout_ms=1,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 0)
+                wait_for_completion(qtest, 0)
+                check_completion(
+                    qtest, 15,
+                    (0xA51C0001, 3, 19, 0, 0, timeout_cookie),
+                )
+                if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
+                        timeout_destination:
+                    raise AssertionError("timed-out command touched payload")
+                qtest.write32(BAR0 + 0x214, 0)
+
+                reset_destination = bytes([0x6B]) * ASYNC_LENGTH
+                qtest.write(ASYNC_DESTINATION, reset_destination)
+                reset_cookie = 0x1100000000000020
+                generation = qtest.read32(BAR0 + 0x028)
+                qtest.write(
+                    SQ_BASE,
+                    submission(
+                        1, 0xA51C0002, reset_cookie, opcode=1,
+                        source=ASYNC_SOURCE,
+                        destination=ASYNC_DESTINATION,
+                        length=ASYNC_LENGTH,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 1)
+                wait_for_engine_busy(qtest)
+                if qtest.read32(BAR0 + 0x210) != 0:
+                    raise AssertionError(
+                        "engine published completion before expiry"
+                    )
+                qtest.write32(BAR0 + 0x118, 2)
+                expected_generation = (generation + 1) & 0xFFFFFFFF
+                if qtest.read32(BAR0 + 0x028) != expected_generation:
+                    raise AssertionError("queue reset generation mismatch")
+                if qtest.read32(BAR0 + 0x01C) & (1 << 3):
+                    raise AssertionError("engine remained busy after reset")
+                qtest.clock_step(10_000_000)
+                if qtest.read32(BAR0 + 0x210) != 0:
+                    raise AssertionError("cancelled engine published stale CQ")
+                if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
+                        reset_destination:
+                    raise AssertionError("cancelled engine touched payload")
+
+                configure_queues(qtest)
+                recovery_cookie = 0x1200000000000021
+                qtest.write(
+                    SQ_BASE,
+                    submission(1, 0xA51C0003, recovery_cookie),
+                )
+                qtest.write32(BAR0 + 0x114, 1)
+                wait_for_completion(qtest, 1)
+                check_completion(
+                    qtest, 0,
+                    (0xA51C0003, 0, 0, 0, 0, recovery_cookie),
+                )
+                qtest.write32(BAR0 + 0x214, 1)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -735,6 +834,12 @@ def main():
                 "cookie=0x0e0000000000001d",
                 "Command: id=0xadd40008 status=0 error=0 "
                 "cookie=0x0f0000000000001e",
+                "Command: id=0xa51c0001 status=0 error=0 "
+                "cookie=0x100000000000001f",
+                "Command: id=0xa51c0002 status=0 error=0 "
+                "cookie=0x1100000000000020",
+                "Command: id=0xa51c0003 status=0 error=0 "
+                "cookie=0x1200000000000021",
             )
             if not all(line in command_output for line in required):
                 print(firmware_output, file=sys.stderr)
@@ -749,7 +854,8 @@ def main():
 
     print("VAMS firmware-owned MEM_COPY/MEM_FILL/CRC32/VECTOR_ADD: "
           "data=PASS validation=PASS DMA-errors=PASS")
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=34 host=33 PASS")
+    print("VAMS async engine: deadline=PASS reset-cancel=PASS recovery=PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=37 host=35 PASS")
     return 0
 
 

@@ -1,0 +1,161 @@
+Subject: [PATCH] hw/misc: assert VAMS command-state invariants
+
+Fail fast when queue geometry, command ownership, BUSY state, or engine
+generation becomes inconsistent. Check the invariants around every existing
+ownership transition, completion publication, reset, and status observation.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -147,6 +147,34 @@ struct VamsPcieState {
+     bool engine_inflight;
+ };
+ 
++static void vams_pcie_check_invariants(const VamsPcieState *s)
++{
++    if (s->sq_depth) {
++        g_assert(s->sq_depth >= VAMS_QUEUE_MIN_DEPTH);
++        g_assert(s->sq_depth <= VAMS_QUEUE_MAX_DEPTH);
++        g_assert(!(s->sq_depth & (s->sq_depth - 1)));
++        g_assert(s->sq_head < s->sq_depth);
++        g_assert(s->sq_tail < s->sq_depth);
++    }
++    if (s->cq_depth) {
++        g_assert(s->cq_depth >= VAMS_QUEUE_MIN_DEPTH);
++        g_assert(s->cq_depth <= VAMS_QUEUE_MAX_DEPTH);
++        g_assert(!(s->cq_depth & (s->cq_depth - 1)));
++        g_assert(s->cq_head < s->cq_depth);
++        g_assert(s->cq_tail < s->cq_depth);
++    }
++    g_assert(!(s->bridge_inflight && s->bridge_discard_completion));
++    g_assert(!(s->bridge_inflight && s->engine_inflight));
++    g_assert(!(s->bridge_discard_completion && s->engine_inflight));
++    g_assert(!!(s->device_status & VAMS_STATUS_ENGINE_BUSY) ==
++             s->engine_inflight);
++    if (s->engine_inflight) {
++        g_assert(s->engine_generation == s->reset_generation);
++        g_assert(s->command_deadline_ns > 0);
++        g_assert(s->engine_finish_ns > 0);
++    }
++}
++
+ static void vams_pcie_notify(VamsPcieState *s, uint32_t pending)
+ {
+     PCIDevice *pdev = PCI_DEVICE(s);
+@@ -249,6 +277,7 @@ static void vams_pcie_cancel_engine(VamsPcieState *s)
+     timer_del(s->engine_timer);
+     s->engine_inflight = false;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
++    vams_pcie_check_invariants(s);
+ }
+ 
+ static void vams_pcie_queue_reset(VamsPcieState *s)
+@@ -268,6 +297,7 @@ static void vams_pcie_queue_reset(VamsPcieState *s)
+     s->intr_status &= ~VAMS_INTR_CQ;
+     msix_clr_pending(PCI_DEVICE(s), 0);
+     s->reset_generation++;
++    vams_pcie_check_invariants(s);
+ }
+ 
+ static bool vams_pcie_range_overflows(uint64_t address, uint32_t length)
+@@ -397,6 +427,7 @@ static bool vams_pcie_publish_completion(
+                          (uint64_t)s->cq_tail * VAMS_COMPLETION_SIZE;
+     MemTxResult result;
+ 
++    vams_pcie_check_invariants(s);
+     result = pci_dma_write(pdev, address, completion, sizeof(*completion));
+     if (result != MEMTX_OK) {
+         s->cq_error = true;
+@@ -405,6 +436,7 @@ static bool vams_pcie_publish_completion(
+     }
+     s->cq_tail = (s->cq_tail + 1) & (s->cq_depth - 1);
+     vams_pcie_raise_interrupt(s, VAMS_INTR_CQ);
++    vams_pcie_check_invariants(s);
+     return true;
+ }
+ 
+@@ -550,9 +582,11 @@ static void vams_pcie_engine_complete(void *opaque)
+     struct vams_completion *completion =
+         (struct vams_completion *)s->bridge_completion;
+ 
++    vams_pcie_check_invariants(s);
+     g_assert(s->engine_inflight);
+     s->engine_inflight = false;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
++    vams_pcie_check_invariants(s);
+ 
+     if (s->engine_generation != s->reset_generation) {
+         return;
+@@ -589,6 +623,7 @@ static void vams_pcie_schedule_engine(VamsPcieState *s)
+     s->device_status |= VAMS_STATUS_ENGINE_BUSY;
+     expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
+     timer_mod_ns(s->engine_timer, MAX(expiry, now));
++    vams_pcie_check_invariants(s);
+ }
+ 
+ static int vams_pcie_bridge_can_receive(void *opaque)
+@@ -606,6 +641,7 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+ {
+     VamsPcieState *s = opaque;
+ 
++    vams_pcie_check_invariants(s);
+     g_assert(s->bridge_inflight || s->bridge_discard_completion);
+     g_assert(size <= VAMS_COMPLETION_SIZE - s->bridge_completion_pos);
+     memcpy(s->bridge_completion + s->bridge_completion_pos, buf, size);
+@@ -617,6 +653,7 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+     s->bridge_completion_pos = 0;
+     if (s->bridge_discard_completion) {
+         s->bridge_discard_completion = false;
++        vams_pcie_check_invariants(s);
+         vams_pcie_process_sq(s);
+         return;
+     }
+@@ -643,6 +680,7 @@ static void vams_pcie_bridge_event(void *opaque, QEMUChrEvent event)
+         s->bridge_discard_completion = false;
+         s->bridge_completion_pos = 0;
+         vams_pcie_set_error(s, VAMS_ERROR_DMA | VAMS_ERROR_QUEUE);
++        vams_pcie_check_invariants(s);
+     }
+ }
+ 
+@@ -650,6 +688,7 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+ {
+     PCIDevice *pdev = PCI_DEVICE(s);
+ 
++    vams_pcie_check_invariants(s);
+     if (!(s->device_control & VAMS_CONTROL_ENABLE) ||
+         (s->device_control & VAMS_CONTROL_QUIESCE) ||
+         !(pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MASTER)) {
+@@ -691,6 +730,7 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+             }
+             s->sq_head = (s->sq_head + 1) & (s->sq_depth - 1);
+             qemu_chr_fe_accept_input(&s->command_chr);
++            vams_pcie_check_invariants(s);
+             return;
+         }
+         s->sq_head = (s->sq_head + 1) & (s->sq_depth - 1);
+@@ -767,6 +807,7 @@ static void vams_pcie_device_reset(VamsPcieState *s)
+     timer_mod(s->reset_timer,
+               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+               VAMS_DEVICE_RESET_DELAY_MS);
++    vams_pcie_check_invariants(s);
+ }
+ 
+ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+@@ -795,6 +836,7 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+     case VAMS_REG_QUEUE_LIMITS:
+         return 0x04000010;
+     case VAMS_REG_DEVICE_STATUS:
++        vams_pcie_check_invariants(s);
+         return s->device_status;
+     case VAMS_REG_DEVICE_CONTROL:
+         return s->device_control;
+@@ -1192,6 +1234,7 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->engine_finish_ns = 0;
+     s->engine_generation = 0;
+     s->engine_inflight = false;
++    vams_pcie_check_invariants(s);
+ }
+ 
+ static void vams_pcie_realize(PCIDevice *pdev, Error **errp)

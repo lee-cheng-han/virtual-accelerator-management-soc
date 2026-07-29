@@ -32,9 +32,10 @@ CRC. The buffer is released before completion publication. An allocation or
 independent-validation failure reports `FAILED/ENGINE`; an inaccessible source
 reports `FAILED/DMA_READ`. Failures other than CRC mismatch return zero CRC.
 
-The implementation is synchronous and single-command. Chunked asynchronous
-calculation, deadlines, abort, hardware acceleration, and performance claims
-remain future work.
+The implementation is single-command. Dispatch, deadlines, and reset
+cancellation are asynchronous in virtual time, while calculation remains one
+callback. Chunked calculation, abort, hardware acceleration, and performance
+claims remain future work.
 
 ## Validation
 

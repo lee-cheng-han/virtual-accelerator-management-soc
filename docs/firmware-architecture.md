@@ -12,6 +12,12 @@ performs the authorized payload operation and finalizes its byte count and
 optional CRC result. The task decomposition below remains the target for
 asynchronous scheduling, engine monitoring, and recovery.
 
+The current PCI model supplies the first asynchronous execution boundary after
+firmware authorization. It captures the command deadline and reset generation,
+exposes BUSY, and either runs the payload callback or returns a timeout. This is
+hardware-model execution state; the full Zephyr scheduler/DMA-manager task split
+described below is not yet implemented.
+
 ## Boot and steady state
 
 Boot ROM establishes stack/trap state and enters an SRAM image. Firmware clears

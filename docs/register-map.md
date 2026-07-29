@@ -16,6 +16,10 @@ return illegal-MMIO behavior. See the
 [CRC32 guide](crc32-command-path.md), and
 [VECTOR_ADD guide](vector-add-command-path.md) for the implemented subset.
 
+`DEVICE_STATUS.ENGINE_BUSY` is implemented by the virtual-time engine. It
+asserts after firmware authorization and clears before timeout/success/error CQ
+publication or synchronously on queue/device reset.
+
 ## Global rules
 
 BAR0 is a 4096-byte, non-prefetchable PCI memory BAR. Registers are

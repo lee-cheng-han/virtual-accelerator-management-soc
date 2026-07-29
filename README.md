@@ -6,7 +6,8 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **All v1 payload operations implemented.** The
+> Status: **All v1 payload operations implemented. Asynchronous engine deadlines implemented.**
+> The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
 > validates generated-ABI NOP descriptors and publishes completions, while the
@@ -16,6 +17,9 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > Firmware-validated `MEM_COPY`, `MEM_FILL`, `CRC32`, and `VECTOR_ADD` now
 > perform checked PCI payload DMA with exact byte counts, guarded writes,
 > verified CRC results, and little-endian vector arithmetic.
+> Payload execution now crosses a deterministic virtual-time engine boundary;
+> command deadlines and queue-reset cancellation are validated without
+> wall-clock timing.
 
 ## Architecture
 
@@ -71,6 +75,10 @@ internal management peripheral, not the host datapath.
   stale-completion suppression across queue reset
 - Firmware-owned `MEM_COPY`, `MEM_FILL`, `CRC32`, and `VECTOR_ADD` validation
   with QEMU PCI DMA execution
+- Virtual-time engine BUSY state, absolute deadlines, timeout completion, and
+  reset-generation callback suppression
+- Fail-fast queue/bridge/engine invariants plus replayable raw-descriptor and
+  malformed-BAR mutation regressions
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
@@ -146,6 +154,12 @@ make vector-add-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make async-engine-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make assurance-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make queue-model-smoke \
@@ -192,6 +206,8 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [MEM_FILL command path](docs/mem-fill-command-path.md) | Firmware validation, write-only DMA, ordering, and integrity tests |
 | [CRC32 command path](docs/crc32-command-path.md) | Firmware validation, IEEE CRC result checking, DMA errors, and tests |
 | [VECTOR_ADD command path](docs/vector-add-command-path.md) | Firmware validation, little-endian arithmetic, DMA errors, and tests |
+| [Asynchronous engine](docs/asynchronous-engine.md) | Virtual-time execution, deadlines, BUSY state, reset cancellation, and tests |
+| [Assurance](docs/assurance.md) | Executable invariants, descriptor/BAR fuzzing, replay, and sanitizer use |
 
 ## Planned repository areas
 
@@ -205,9 +221,10 @@ scaffolding and gain tracked files only when their components are built.
 
 - Target-specific QEMU binaries require the PCI endpoint and RV32 management
   subsystem to run as two processes joined by a private local bridge.
-- All four v1 payload commands use a synchronous correctness-first QEMU engine.
-  Asynchronous execution, engine registers, and host telemetry are not
-  implemented.
+- All four v1 payload commands use a correctness-first virtual-time QEMU engine.
+  Dispatch, deadlines, and reset cancellation are asynchronous, but each
+  callback still performs payload DMA monolithically. Engine-control registers
+  and host telemetry are not implemented.
 - The endpoint retains a direct validator only for isolated QTests; integrated
   NOP and all four v1 payload commands use real Zephyr validation.
 - The public host API currently exposes device information and synchronous NOP;

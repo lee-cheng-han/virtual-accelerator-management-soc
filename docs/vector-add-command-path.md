@@ -29,10 +29,12 @@ either operand reports `FAILED/DMA_READ`; destination publication failure
 reports `FAILED/DMA_WRITE`. All failures report zero processed bytes, and
 destination contents are unspecified after failure.
 
-The engine remains synchronous and single-command. The current QTest memory map
-does not expose a region that succeeds on DMA read but independently fails a
-later write, so VECTOR_ADD directly covers both operand-read failures while the
-existing copy/fill tests retain directional destination-write failure coverage.
+The engine remains single-command. Dispatch, deadlines, and reset cancellation
+are asynchronous in virtual time, while both operand reads, arithmetic, and the
+write occur in one callback. The current QTest memory map does not expose a
+region that succeeds on DMA read but independently fails a later write, so
+VECTOR_ADD directly covers both operand-read failures while the existing
+copy/fill tests retain directional destination-write failure coverage.
 
 ## Validation
 

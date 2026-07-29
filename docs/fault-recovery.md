@@ -40,6 +40,13 @@ Tests must arm, confirm armed state, perform exactly one triggering action,
 observe `FAULT_STATUS/COUNT`, validate recovery, and execute a clean NOP. A test
 must fail if the fault does not trigger or triggers twice.
 
+The asynchronous-engine baseline now covers a natural one-millisecond deadline
+against a deterministic two-millisecond operation and queue reset after BUSY
+assertion. It proves timeout-before-payload, timer cancellation, generation
+suppression, and clean NOP recovery. The debug fault bits, forced abort failure,
+engine-only reset, counters, and named pause checkpoints in the table remain
+unimplemented.
+
 ## Escalation policy
 
 Recovery manager records the first cause and scope. A command abort receives

@@ -94,4 +94,14 @@ little-endian vector arithmetic with unsigned wraparound, exact byte counts,
 source preservation, destination guards, zero length, 64-bit range overflow,
 zero/misaligned addresses, overlap rejection, invalid CRC flags, and
 directional DMA failures.
+The same run, exposed as `async-engine-smoke`, advances QEMU virtual time
+explicitly to verify timeout-before-payload, observes BUSY before advancing the
+engine, resets the queue, advances beyond the cancelled expiry, rejects stale CQ
+and payload writes, then completes a clean post-reset NOP.
+`descriptor-fuzz` executes 4,096 raw descriptors across 28 first-error
+categories and checks the exact completion contract. `bar-fuzz` executes 4,096
+mixed-width malformed accesses while periodically checking immutable identity,
+device invariants, and timer progress. Both print stable seeds and complete
+replay context on failure; `fuzz-smoke` runs them together and
+`assurance-smoke` adds ABI, source-hygiene, and queue-model checks.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.

@@ -13,6 +13,8 @@ SPEC_DOCS := README.md \
 	docs/linux-pci-driver.md docs/nop-command-path.md \
 	docs/mem-copy-command-path.md docs/mem-fill-command-path.md \
 	docs/crc32-command-path.md docs/vector-add-command-path.md
+SPEC_DOCS += docs/asynchronous-engine.md
+SPEC_DOCS += docs/assurance.md
 
 SPEC_DOCS += docs/linux-uapi.md
 
@@ -33,14 +35,18 @@ ZEPHYR_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr
 ZEPHYR_WATCHDOG_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-watchdog
 VAMS_ZEPHYR_FIRMWARE ?= $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
+VAMS_DESCRIPTOR_FUZZ_SEED ?= 0xd35c0123
+VAMS_BAR_FUZZ_SEED ?= 0xba4f0223
+VAMS_FUZZ_ITERATIONS ?= 4096
 
 .PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
-	vector-add-smoke \
+	vector-add-smoke async-engine-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
+	descriptor-fuzz bar-fuzz fuzz-smoke source-check assurance-smoke \
 	qemu-patch-check tree clean demo
 
 help:
@@ -74,10 +80,18 @@ help:
 	  '  make crc32-smoke  Verify firmware-owned CRC32 and result checking' \
 	  '  make vector-add-smoke' \
 	  '                   Verify firmware-owned vector arithmetic and DMA' \
+	  '  make async-engine-smoke' \
+	  '                   Verify deadlines and reset-safe engine cancellation' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make queue-model-smoke' \
 	  '                   Compare randomized SQ/CQ sequences with the model' \
+	  '  make descriptor-fuzz' \
+	  '                   Mutate raw descriptors with a replayable seed' \
+	  '  make bar-fuzz     Drive malformed BAR sequences with a replayable seed' \
+	  '  make fuzz-smoke   Run descriptor and BAR fuzz regressions' \
+	  '  make assurance-smoke' \
+	  '                   Run ABI, source, model, and fuzz assurance checks' \
 	  '  make abi-check    Regenerate-check and compile-test the v1 ABI' \
 	  '  make kernel       Build the production vams_pci kernel module' \
 	  '  make kernel-uapi-test' \
@@ -100,6 +114,7 @@ check-docs:
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
 	grep -q 'All v1 payload operations implemented' README.md; \
+	grep -q 'Asynchronous engine deadlines implemented' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -209,6 +224,8 @@ crc32-smoke: firmware-pcie-smoke
 
 vector-add-smoke: firmware-pcie-smoke
 
+async-engine-smoke: firmware-pcie-smoke
+
 pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
@@ -220,6 +237,31 @@ nop-smoke:
 queue-model-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/qtest/vams-queue-model.py
+
+descriptor-fuzz:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/fuzz/vams-descriptor-fuzz.py \
+		--seed "$(VAMS_DESCRIPTOR_FUZZ_SEED)" \
+		--iterations "$(VAMS_FUZZ_ITERATIONS)"
+
+bar-fuzz:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/fuzz/vams-bar-fuzz.py \
+		--seed "$(VAMS_BAR_FUZZ_SEED)" \
+		--iterations "$(VAMS_FUZZ_ITERATIONS)"
+
+fuzz-smoke: descriptor-fuzz bar-fuzz
+
+source-check:
+	python3 -m py_compile scripts/*.py tests/abi/*.py \
+		qemu/tests/*.py qemu/tests/qtest/*.py qemu/tests/fuzz/*.py
+	@set -eu; \
+	for script in scripts/*.sh qemu/tests/*.sh kernel/tests/*.sh; do \
+		sh -n "$$script"; \
+	done
+	git diff --check
+
+assurance-smoke: check source-check queue-model-smoke fuzz-smoke
 
 kernel:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)"
@@ -288,6 +330,14 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0009-hw-misc-add-vams-crc32-engine.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0010-hw-misc-add-vams-vector-add-engine.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0010-hw-misc-add-vams-vector-add-engine.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0011-hw-misc-add-vams-asynchronous-engine.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0011-hw-misc-add-vams-asynchronous-engine.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0012-hw-misc-assert-vams-state-invariants.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

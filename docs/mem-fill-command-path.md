@@ -27,8 +27,10 @@ reports `FAILED/DMA_READ`, and an inaccessible destination reports
 `FAILED/DMA_WRITE`. Every failure reports zero processed bytes and destination
 contents are unspecified, matching the v1 all-or-nothing reporting contract.
 
-The engine remains synchronous and single-command. Chunked asynchronous work,
-deadlines, abort, and Linux userspace payload submission remain future work.
+The engine remains single-command. Dispatch, deadlines, and reset cancellation
+are asynchronous in virtual time, while the payload callback remains
+monolithic. Chunked work, abort, and Linux userspace payload submission remain
+future work.
 
 ## Validation
 

@@ -16,6 +16,13 @@ Terminal results wait in the completion service until CQ publication, then the
 object returns to FREE. `COMPLETED_ERROR` includes validation and execution
 failure; status/error fields distinguish them.
 
+The current integrated implementation realizes the
+VALIDATING→RUNNING→terminal slice for one command through the private firmware
+bridge and QEMU virtual-time engine. `ENGINE_BUSY`, absolute deadline expiry,
+queue-reset cancellation, generation checking, and clean post-reset recovery
+are executable. A separate firmware scheduler queue, abort handshake, and
+engine-only reset remain planned.
+
 ## Transition ownership and invariants
 
 | From → to | Owner / trigger | Required action |
@@ -76,4 +83,3 @@ periodic outstanding-work polling drain it and acknowledge the sticky source.
 **Submitting process exit.** Driver marks the request orphaned but retains its
 mapping until completion/reset. It drains and discards the completion. Exit does
 not cancel a running device command merely by dropping user references.
-

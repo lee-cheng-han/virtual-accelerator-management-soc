@@ -33,9 +33,12 @@ runs real Zephyr validation, and DMA-publishes firmware completions. Basic
 queue-reset stale-result suppression is tested. Firmware now validates every v1
 payload opcode, and the QEMU engine performs exact checked PCI payload DMA with
 guarded copy/fill/vector data integrity and independently verified CRC coverage.
-Asynchronous engine execution, fuzzing, and throughput evidence remain before
-this gate closes. Broader timeout, disconnect, and reset recovery remains in the
-recovery gate.
+Virtual-time asynchronous dispatch now exposes BUSY, enforces command deadlines
+before payload access, and cancels reset-generation callbacks without stale CQ
+publication. Executable queue/bridge/engine invariants and replayable raw
+descriptor/BAR mutation regressions now cover the implemented QEMU surface.
+Throughput evidence remains before this gate closes. Abort handshakes,
+disconnect handling, and broader recovery remain in the recovery gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
@@ -53,6 +56,25 @@ correct asynchronous DMA cancellation on reset, Zephyr timer/IRQ compatibility,
 and host-memory lifetime during process exit. Each receives a focused test at
 the first phase where it exists. Toolchain and QEMU revisions will be pinned in
 that phase rather than guessed in Phase 0.
+
+## Improvement implementation program
+
+The following work is part of the roadmap rather than an informal wish list.
+Assurance is applied when a component exists; future-component rows remain
+explicitly planned and are not counted as implemented.
+
+| Improvement | Applied to completed work | Remaining acceptance work |
+|---|---|---|
+| Executable state invariants | QEMU queue indices, bridge/engine ownership, BUSY equivalence, deadlines, and reset generation are fail-fast assertions. | Firmware command-pool ownership, exactly-once counters, mapping lifetime, and engine epoch. |
+| Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
+| Real firmware scheduler | Current Zephyr firmware owns descriptor validation and authorization. | Fixed object pool plus validator, scheduler, DMA, completion, and recovery queues. |
+| Timeout and recovery | Virtual-time deadline, timeout-before-payload, BUSY reset cancellation, generation suppression, and clean recovery NOP. | Abort handshake, engine-only reset, bridge disconnect, escalation counters, and firmware-owned deadline scheduling. |
+| Chunked DMA | Transfer limits, directional errors, guarded integrity, and all-or-nothing completion are tested. | Bounded chunks, cancellation points, Nth-chunk faults, and memory-pressure evidence. |
+| Deterministic faults | Natural timeout and reset-after-BUSY race are deterministic. | Debug-gated DMA/IRQ/engine/task/mailbox faults and named pause/release checkpoints. |
+| Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
+| Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
+| Stress/performance | Queue model covers wrap, backpressure, errors, interrupts, and reset under four seeds. | Million-command/reset qualification, latency distributions, stack/SRAM high-water, and watchdog margin. |
+| Reproducible CI/demo | Generated ABI checks, strict builds, and source hygiene run in lightweight CI; hardware-free fuzz regressions have replayable seeds. | Pinned images/toolchains, sanitizer/static-analysis CI, compatibility matrix, evidence archive, and unified demo. |
 
 ## Release-quality engineering tracks
 

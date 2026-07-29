@@ -5,8 +5,9 @@
 The QEMU type `vams-pcie` is a PCI Express processing-accelerator endpoint. It
 provides the host-visible identity/control foundation plus one coherent command
 queue. The private dual-QEMU bridge and all firmware-owned v1 payload operations
-now work in integration tests. Host payload UAPI and asynchronous engine
-execution remain unavailable.
+now work in integration tests. A virtual-time engine supplies BUSY state,
+deadline completion, and reset-safe callback cancellation. Host payload UAPI,
+chunked DMA, and engine-control registers remain unavailable.
 
 | PCI field | Value |
 |---|---:|
@@ -70,9 +71,10 @@ asserts and RESET_DONE becomes pending. Error state clears except for the
 architecturally persistent fatal bit; last-fatal state remains preserved until
 cold reset.
 
-The PCI configuration, MSI-X table/PBA, BAR0 state, and an in-progress reset
-timer are migration state. Live migration is not an accepted platform feature
-until an end-to-end migration regression exists.
+The PCI configuration, MSI-X table/PBA, BAR0 state, in-progress reset timer, and
+active engine command/timer/deadline/generation are migration state. Live
+migration is not an accepted platform feature until an end-to-end migration
+regression exists.
 
 ## Validation
 

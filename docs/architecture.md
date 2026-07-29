@@ -57,6 +57,12 @@ DMA-write their destination; CRC32 returns the IEEE result in the completion;
 vector add snapshots both operands and performs little-endian `uint32_t`
 addition modulo 2³².
 
+Firmware-authorized payload commands cross a deterministic virtual-time engine
+boundary. The endpoint captures an absolute deadline and reset generation,
+asserts `ENGINE_BUSY`, and stops SQ consumption until the timer reaches either
+the modeled finish or the earlier deadline. Queue/device reset cancels the timer
+and generation checks guard both execution and CQ publication.
+
 ## Address spaces
 
 Host BAR0 is one 4 KiB non-prefetchable register BAR. A later optional BAR2 may
