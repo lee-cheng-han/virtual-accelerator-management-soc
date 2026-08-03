@@ -3,6 +3,11 @@
 Phase 0 contains no performance results. QEMU timing is useful for regressions
 and control-plane analysis, not a prediction of physical silicon throughput.
 
+The implemented `payload-throughput-smoke` reports host-clock throughput for
+one integrity-checked 16 MiB MEM_COPY. It is an early regression observation,
+not the statistically controlled benchmark described below, and currently has
+no numerical acceptance threshold.
+
 ## Metrics
 
 - Command latency from host tail publication to CQ observation, reported as
@@ -45,4 +50,3 @@ performance run and remain visible.
 The final report separates measured QEMU behavior from design targets, includes
 raw artifacts and commands, and explains bottlenecks. README numbers are added
 only after the automated benchmark reproduces them.
-

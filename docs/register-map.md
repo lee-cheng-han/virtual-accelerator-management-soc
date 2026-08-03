@@ -5,11 +5,10 @@ the final release-1 values; an intermediate phase must read capabilities and
 must not advertise a feature until it works.
 
 The current QEMU PCIe model implements identification/device control, SQ/CQ,
-and interrupt control. It advertises capability bits 0, 1, and 5: DMA, MSI-X,
-and polling-safe CQ. All v1 payload operations are implemented without the
-planned engine-control register block. Watchdog bridge, host
-telemetry snapshot, engine registers, and debug blocks remain unimplemented and
-return illegal-MMIO behavior. See the
+interrupt control, engine observation, and engine-only reset. It advertises
+capability bits 0, 1, 4, and 5: DMA, MSI-X, engine reset, and polling-safe CQ.
+Watchdog bridge, host telemetry snapshot, firmware-issued engine control, and
+debug blocks remain unimplemented and return illegal-MMIO behavior. See the
 [NOP command-path guide](nop-command-path.md),
 [MEM_COPY guide](mem-copy-command-path.md),
 [MEM_FILL guide](mem-fill-command-path.md),
@@ -139,9 +138,10 @@ This block carries lifecycle notifications, never command payloads.
 | Offset | Register | Reset | Access | Owner | Definition / write and reset effects |
 |---:|---|---:|---|---|---|
 | `500` | `VAMS_ENGINE_STATUS` | `00000000` | RO | HW | Bit 0 BUSY, 1 DMA_ACTIVE, 2 HUNG, 3 ERROR. Engine reset clears all. |
-| `504` | `VAMS_ENGINE_CONTROL` | `00000000` | W1S | FW via bridge | Bit 0 ABORT, 1 RESET. Host writes rejected as RO_WRITE. RESET blocks DMA, increments a private engine epoch, and clears engine state; it does not change host reset generation. |
+| `504` | `VAMS_ENGINE_CONTROL` | `00000000` | W1S | FW via bridge | Bit 0 ABORT, 1 RESET. Host writes rejected as RO_WRITE. The current QEMU model returns zero and does not yet accept firmware bridge writes; host engine reset uses `VAMS_RESET_REQUEST`. |
 | `508` | `VAMS_ENGINE_COMMAND_ID` | `00000000` | RO | FW/HW | Running command ID; zero when idle (ID zero remains legal, so STATUS determines validity). |
-| `50c` | `VAMS_ENGINE_ERROR` | `00000000` | W1C | HW sets; FW clears | Bits 0 DMA_READ, 1 DMA_WRITE, 2 TIMEOUT, 3 ABORT_FAILED, 4 BAD_OPERATION. Device reset also clears. Host writes rejected. |
+| `50c` | `VAMS_ENGINE_ERROR` | `00000000` | W1C | HW sets; FW clears | Bits 0 DMA_READ, 1 DMA_WRITE, 2 TIMEOUT, 3 ABORT_FAILED, 4 BAD_OPERATION. The current model exposes bits 0–2 read-only to the host and clears them on engine/device reset; firmware clearing is not yet bridged. |
+| `510` | `VAMS_ENGINE_EPOCH` | `00000000` | RO | HW | Private engine epoch. Increments on engine, queue, and device reset; active callbacks must match it. It does not replace or alter host reset generation. |
 
 ## Watchdog and reset
 
@@ -150,9 +150,14 @@ This block carries lifecycle notifications, never command payloads.
 | `600` | `VAMS_WDT_TIMEOUT_MS` | `00001388` | RW | Host policy; FW validates | Timeout 100–60000 ms; reset 5000. Writable only while WDT disabled. |
 | `604` | `VAMS_WDT_CONTROL` | `00000000` | RW | Host/FW policy | Bit 0 ENABLE, bit 1 PAUSE_WHEN_DEBUGGED. Reserved bits illegal. Enabling starts countdown. Device reset disables; Mgmt reset preserves ENABLE and restarts countdown. |
 | `608` | `VAMS_WDT_PET` | `00000000` | WO | FW | Magic write `0x56414d53` reloads; any other write sets FW error and does not reload. Host write rejected. Read zero. |
-| `60c` | `VAMS_RESET_REQUEST` | `00000000` | W1S | Host | Bits 0 QUEUES, 1 ENGINE, 2 MGMT, 3 DEVICE. Exactly one bit is legal; multiple/zero rejected. Self-clears when accepted. |
+| `60c` | `VAMS_RESET_REQUEST` | `00000000` | W1S | Host | Bits 0 QUEUES, 1 ENGINE, 2 MGMT, 3 DEVICE. Exactly one bit is legal; multiple/zero rejected. Self-clears when accepted. The current model implements bit 1 here; queue and device reset remain available through their dedicated controls. |
 | `610` | `VAMS_LAST_RESET_REASON` | `00000000` | RO | HW | Enum: 0 power-on, 1 host-device, 2 host-queue, 3 host-engine, 4 host-mgmt, 5 watchdog, 6 fatal, 7 QEMU migration. Updated at reset entry; preserved except Cold reset. |
 | `614` | `VAMS_RESET_STATUS` | `00000000` | RO | HW | Bit 0 IN_PROGRESS; `[7:4]` scope enum. Cleared only after DMA is stopped and reset is complete. |
+
+Engine reset is synchronous in the current model, so `RESET_STATUS` remains
+zero. It cancels the active timer, advances `ENGINE_EPOCH`, clears engine-local
+errors, publishes exactly one `RESET/RESET` completion for active work, leaves
+`RESET_GENERATION` unchanged, and resumes any descriptors already queued.
 
 ## Health and telemetry
 

@@ -688,7 +688,7 @@ def main():
                         source=ASYNC_SOURCE,
                         destination=ASYNC_DESTINATION,
                         length=ASYNC_LENGTH,
-                        timeout_ms=1,
+                        timeout_ms=10,
                     ),
                 )
                 qtest.write32(BAR0 + 0x114, 0)
@@ -727,7 +727,7 @@ def main():
                     raise AssertionError("queue reset generation mismatch")
                 if qtest.read32(BAR0 + 0x01C) & (1 << 3):
                     raise AssertionError("engine remained busy after reset")
-                qtest.clock_step(10_000_000)
+                qtest.clock_step(50_000_000)
                 if qtest.read32(BAR0 + 0x210) != 0:
                     raise AssertionError("cancelled engine published stale CQ")
                 if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
@@ -747,6 +747,61 @@ def main():
                     (0xA51C0003, 0, 0, 0, 0, recovery_cookie),
                 )
                 qtest.write32(BAR0 + 0x214, 1)
+
+                engine_reset_destination = bytes([0x7C]) * ASYNC_LENGTH
+                qtest.write(ASYNC_DESTINATION, engine_reset_destination)
+                engine_reset_cookie = 0x1300000000000022
+                queued_cookie = 0x1400000000000023
+                generation = qtest.read32(BAR0 + 0x028)
+                engine_epoch = qtest.read32(BAR0 + 0x510)
+                qtest.write(
+                    SQ_BASE + SUBMISSION.size,
+                    submission(
+                        1, 0xA51C0004, engine_reset_cookie, opcode=1,
+                        source=ASYNC_SOURCE,
+                        destination=ASYNC_DESTINATION,
+                        length=ASYNC_LENGTH,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 2)
+                wait_for_engine_busy(qtest)
+                if qtest.read32(BAR0 + 0x508) != 0xA51C0004:
+                    raise AssertionError("engine command ID mismatch")
+                qtest.write(
+                    SQ_BASE + 2 * SUBMISSION.size,
+                    submission(1, 0xA51C0005, queued_cookie),
+                )
+                qtest.write32(BAR0 + 0x114, 3)
+                qtest.write32(BAR0 + 0x60C, 1 << 1)
+                wait_for_completion(qtest, 3)
+                check_completion(
+                    qtest, 1,
+                    (0xA51C0004, 5, 21, 0, 0, engine_reset_cookie),
+                )
+                check_completion(
+                    qtest, 2,
+                    (0xA51C0005, 0, 0, 0, 0, queued_cookie),
+                )
+                if qtest.read32(BAR0 + 0x028) != generation:
+                    raise AssertionError(
+                        "engine reset changed host reset generation"
+                    )
+                if qtest.read32(BAR0 + 0x510) != \
+                        ((engine_epoch + 1) & 0xFFFFFFFF):
+                    raise AssertionError("engine epoch did not advance")
+                if qtest.read32(BAR0 + 0x610) != 3:
+                    raise AssertionError("engine reset reason mismatch")
+                if qtest.read32(BAR0 + 0x500) & 1:
+                    raise AssertionError("engine remained busy after reset")
+                if qtest.read32(BAR0 + 0x508) != 0:
+                    raise AssertionError("engine command ID remained active")
+                if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
+                        engine_reset_destination:
+                    raise AssertionError("engine-reset command touched payload")
+                qtest.clock_step(50_000_000)
+                if qtest.read32(BAR0 + 0x210) != 3:
+                    raise AssertionError("stale engine callback published CQ")
+                qtest.write32(BAR0 + 0x214, 3)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -840,6 +895,10 @@ def main():
                 "cookie=0x1100000000000020",
                 "Command: id=0xa51c0003 status=0 error=0 "
                 "cookie=0x1200000000000021",
+                "Command: id=0xa51c0004 status=0 error=0 "
+                "cookie=0x1300000000000022",
+                "Command: id=0xa51c0005 status=0 error=0 "
+                "cookie=0x1400000000000023",
             )
             if not all(line in command_output for line in required):
                 print(firmware_output, file=sys.stderr)
@@ -855,7 +914,9 @@ def main():
     print("VAMS firmware-owned MEM_COPY/MEM_FILL/CRC32/VECTOR_ADD: "
           "data=PASS validation=PASS DMA-errors=PASS")
     print("VAMS async engine: deadline=PASS reset-cancel=PASS recovery=PASS")
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=37 host=35 PASS")
+    print("VAMS engine recovery: epoch=PASS queued-preservation=PASS "
+          "stale-callback=PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=39 host=37 PASS")
     return 0
 
 

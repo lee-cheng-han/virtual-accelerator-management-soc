@@ -40,12 +40,22 @@ Tests must arm, confirm armed state, perform exactly one triggering action,
 observe `FAULT_STATUS/COUNT`, validate recovery, and execute a clean NOP. A test
 must fail if the fault does not trigger or triggers twice.
 
-The asynchronous-engine baseline now covers a natural one-millisecond deadline
-against a deterministic two-millisecond operation and queue reset after BUSY
+The asynchronous-engine baseline now covers a natural ten-millisecond deadline
+against a deterministic twenty-millisecond operation and queue reset after BUSY
 assertion. It proves timeout-before-payload, timer cancellation, generation
-suppression, and clean NOP recovery. The debug fault bits, forced abort failure,
-engine-only reset, counters, and named pause checkpoints in the table remain
+suppression, and clean NOP recovery. Engine-only reset now provides a second
+recovery path: it completes active work as `RESET/RESET`, advances a private
+epoch without changing queue generation, preserves queued work, and rejects the
+cancelled callback after its original deadline. The debug fault bits, forced
+abort failure, counters, and named pause checkpoints in the table remain
 unimplemented.
+
+The firmware scheduler additionally has a test-only dispatch delay that forces
+a legal one-millisecond command to expire while `QUEUED`. The regression
+requires `QUEUED -> ABORTING -> COMPLETED_ERROR`, exactly one timeout
+publication, and a clean following NOP. This is deterministic queued recovery;
+it does not replace the unimplemented running-command firmware abort protocol
+or debug-injected engine-hang fault above.
 
 ## Escalation policy
 

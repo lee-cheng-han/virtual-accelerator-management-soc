@@ -6,7 +6,7 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **All v1 payload operations implemented. Asynchronous engine deadlines implemented.**
+> Status: **Scheduling and recovery complete.**
 > The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
@@ -20,6 +20,12 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > Payload execution now crosses a deterministic virtual-time engine boundary;
 > command deadlines and queue-reset cancellation are validated without
 > wall-clock timing.
+> Every payload operation uses a bounded 64 KiB DMA working chunk, including
+> streaming CRC state and a full 16 MiB copy/integrity throughput smoke.
+> Zephyr now schedules fixed-pool command objects through receiver, validator,
+> earliest-deadline scheduler, and exactly-once completion tasks.
+> Engine-only reset now terminates active work with a reset completion, advances
+> a private engine epoch, preserves queued work, and suppresses stale callbacks.
 
 ## Architecture
 
@@ -77,6 +83,12 @@ internal management peripheral, not the host datapath.
   with QEMU PCI DMA execution
 - Virtual-time engine BUSY state, absolute deadlines, timeout completion, and
   reset-generation callback suppression
+- Bounded 64 KiB payload chunks with maximum-transfer integrity and
+  virtual-model throughput reporting
+- Fixed eight-object Zephyr command pool with asserted ownership transitions,
+  queued deadlines, reset generations, and exactly-once publication
+- Host-visible engine status/error/epoch state and engine-only reset with a
+  terminal reset result, queued-work preservation, and stale-callback rejection
 - Fail-fast queue/bridge/engine invariants plus replayable raw-descriptor and
   malformed-BAR mutation regressions
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
@@ -158,6 +170,14 @@ make async-engine-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make dma-engine-smoke \
+  CROSS_COMPILE=riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make scheduler-recovery-smoke \
+  CROSS_COMPILE=/path/to/riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make assurance-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make pcie-smoke \
@@ -207,6 +227,8 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [CRC32 command path](docs/crc32-command-path.md) | Firmware validation, IEEE CRC result checking, DMA errors, and tests |
 | [VECTOR_ADD command path](docs/vector-add-command-path.md) | Firmware validation, little-endian arithmetic, DMA errors, and tests |
 | [Asynchronous engine](docs/asynchronous-engine.md) | Virtual-time execution, deadlines, BUSY state, reset cancellation, and tests |
+| [Bounded payload DMA](docs/chunked-dma.md) | Chunked working sets, maximum-transfer integrity, and throughput smoke |
+| [Firmware scheduler](docs/firmware-scheduler.md) | Fixed-pool ownership pipeline, EDF dispatch, queued timeout, and exactly-once completion |
 | [Assurance](docs/assurance.md) | Executable invariants, descriptor/BAR fuzzing, replay, and sanitizer use |
 
 ## Planned repository areas
@@ -222,11 +244,16 @@ scaffolding and gain tracked files only when their components are built.
 - Target-specific QEMU binaries require the PCI endpoint and RV32 management
   subsystem to run as two processes joined by a private local bridge.
 - All four v1 payload commands use a correctness-first virtual-time QEMU engine.
-  Dispatch, deadlines, and reset cancellation are asynchronous, but each
-  callback still performs payload DMA monolithically. Engine-control registers
-  and host telemetry are not implemented.
+  Dispatch, deadlines, and reset cancellation are asynchronous, and payload
+  working sets are bounded, but all chunks still execute within one callback.
+  A host-requested engine reset is implemented; mid-command firmware abort
+  acknowledgment and host telemetry are not.
 - The endpoint retains a direct validator only for isolated QTests; integrated
   NOP and all four v1 payload commands use real Zephyr validation.
+- Firmware scheduling covers capture through authorization publication. The
+  payload engine does not yet return running-command events to firmware, so
+  firmware-side abort acknowledgment and DMA-result telemetry remain
+  unimplemented. QEMU independently provides engine-only recovery.
 - The public host API currently exposes device information and synchronous NOP;
   payload mapping and asynchronous userspace submission remain future work.
 - The provisional development PCI ID is not allocated for production use.

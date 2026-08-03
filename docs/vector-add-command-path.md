@@ -15,9 +15,9 @@ addresses must be nonzero and four-byte aligned, neither range may overflow the
 
 Real Zephyr firmware validates the complete captured descriptor before payload
 access. After authorization, the QEMU endpoint independently validates it,
-allocates two bounded private buffers, and DMA-reads the complete source and
-destination operands. Only after both snapshots succeed does it calculate the
-result and DMA-write the destination.
+allocates two 64 KiB private buffers, and captures source and destination
+operands one chunk at a time. Only after both reads for a chunk succeed does it
+calculate and DMA-write that destination chunk.
 
 The implementation uses explicit little-endian loads and stores. Addition is
 performed with `uint32_t`, making overflow defined modulo 2³². It never casts DMA

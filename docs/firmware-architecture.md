@@ -4,19 +4,17 @@ The release-1 firmware is a Zephyr application for `vams_riscv` on one
 RV32IMAC hart. It is the command-policy owner. Hardware owns DMA mechanics and
 register side effects; the host owns buffer mapping and ring production.
 
-The current standalone harness implements the first policy slice as one polling
-command-service task: it captures a generated-ABI descriptor from the private
-portal, acknowledges ownership, validates NOP or any v1 payload opcode in fixed
-first-error order, and publishes an authorization completion. The PCI model
-performs the authorized payload operation and finalizes its byte count and
-optional CRC result. The task decomposition below remains the target for
-asynchronous scheduling, engine monitoring, and recovery.
+The current firmware captures generated-ABI descriptors into an eight-object
+slab and transfers sole ownership through receiver, validator,
+earliest-deadline scheduler, and completion tasks. It validates every v1 opcode
+in fixed first-error order and publishes an authorization result exactly once.
+The PCI model performs authorized payload work and finalizes byte count and CRC.
 
-The current PCI model supplies the first asynchronous execution boundary after
+The current PCI model supplies the asynchronous execution boundary after
 firmware authorization. It captures the command deadline and reset generation,
 exposes BUSY, and either runs the payload callback or returns a timeout. This is
-hardware-model execution state; the full Zephyr scheduler/DMA-manager task split
-described below is not yet implemented.
+hardware-model execution state; a firmware DMA-result task, running-command
+abort handshake, and recovery manager are not yet implemented.
 
 ## Boot and steady state
 
@@ -59,7 +57,7 @@ all owners, using events and acknowledgments rather than taking their locks.
 |---|---|---|
 | ISR event bits | atomic bits + `k_sem_give` | ISR sets/acks; corresponding task atomically exchanges bits. |
 | Task queues | bounded `k_msgq` | Thread-only; producer never holds another lock while posting. |
-| Command pool | `k_mutex` | Receiver allocates, completion/recovery frees. Never used in ISR. |
+| Command pool | Zephyr `k_mem_slab` | Receiver allocates, completion frees; eight fixed objects and no heap allocation. |
 | SQ/CQ indices | single writer + atomic/read barrier | Receiver alone writes SQ head; completion alone writes CQ tail. |
 | Engine registers | DMA manager alone | Recovery requests abort through an event; direct emergency reset is hardware-mediated. |
 | Telemetry live counters | atomics for ISR/HW values; service-owned otherwise | Saturating update; snapshot seqlock prevents torn 64-bit values on RV32. |

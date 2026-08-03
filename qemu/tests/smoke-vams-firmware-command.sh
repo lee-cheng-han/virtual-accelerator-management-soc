@@ -42,6 +42,35 @@ run_case()
         echo "missing firmware command result: $expected" >&2
         exit 1
     }
+    for transition in 'from=0 to=1' 'from=1 to=2'; do
+        grep -Fq "$transition" "$output" || {
+            cat "$output" >&2
+            echo "missing scheduler transition: $transition" >&2
+            exit 1
+        }
+    done
+    if [ "$command" -eq 1 ]; then
+        transitions='from=2 to=3
+from=3 to=4
+from=4 to=6
+from=6 to=0'
+    else
+        transitions='from=2 to=7
+from=7 to=0'
+    fi
+    echo "$transitions" | while IFS= read -r transition; do
+        grep -Fq "$transition" "$output" || {
+            cat "$output" >&2
+            echo "missing scheduler transition: $transition" >&2
+            exit 1
+        }
+    done
+    grep -Fq 'Scheduler: event=published sequence=1 command=0x56414d53 generation=0 count=1' \
+        "$output" || {
+        cat "$output" >&2
+        echo 'missing exactly-once scheduler publication' >&2
+        exit 1
+    }
     if grep -Eq 'ASSERTION FAIL|mcause:' "$output"; then
         cat "$output" >&2
         echo 'firmware command service reported a fatal error' >&2

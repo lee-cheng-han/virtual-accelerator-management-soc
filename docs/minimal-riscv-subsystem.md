@@ -94,6 +94,10 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0011-hw-misc-add-vams-asynchronous-engine.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0012-hw-misc-assert-vams-state-invariants.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0013-hw-misc-bound-vams-payload-dma-working-sets.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"
 ```
 
 Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both

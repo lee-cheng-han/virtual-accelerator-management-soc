@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -17,10 +18,17 @@
 #include <vams_command_portal.h>
 #include <vams_mailbox.h>
 #include <vams_management.h>
+#include <vams_scheduler.h>
 
 #define VAMS_TASK_STACK_SIZE 1024
 #define VAMS_TASK_PRIORITY 5
 #define VAMS_HEALTH_PRIORITY 4
+#define VAMS_RECEIVER_PRIORITY 1
+#define VAMS_VALIDATOR_PRIORITY 2
+#define VAMS_COMPLETION_PRIORITY 2
+#define VAMS_SCHEDULER_PRIORITY 3
+#define VAMS_COMMAND_STACK_SIZE 1536
+#define VAMS_VALIDATOR_STACK_SIZE 2048
 #define VAMS_HEARTBEAT_PERIOD K_MSEC(250)
 #define VAMS_MAILBOX_POLL_PERIOD K_MSEC(100)
 #define VAMS_WATCHDOG_TIMEOUT_MS 1000U
@@ -37,8 +45,19 @@ static struct k_msgq vams_heartbeat_queue;
 K_THREAD_STACK_DEFINE(vams_producer_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_monitor_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_mailbox_stack, VAMS_TASK_STACK_SIZE);
-K_THREAD_STACK_DEFINE(vams_command_stack, VAMS_TASK_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_receiver_stack, VAMS_COMMAND_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_validator_stack, VAMS_VALIDATOR_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_scheduler_stack, VAMS_COMMAND_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_completion_stack, VAMS_COMMAND_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_health_stack, VAMS_TASK_STACK_SIZE);
+K_MEM_SLAB_DEFINE(vams_command_pool, sizeof(struct vams_command_object),
+		  VAMS_COMMAND_POOL_SIZE, 4);
+K_MSGQ_DEFINE(vams_validation_queue, sizeof(struct vams_command_object *),
+	      VAMS_COMMAND_POOL_SIZE, 4);
+K_MSGQ_DEFINE(vams_ready_queue, sizeof(struct vams_command_object *),
+	      VAMS_COMMAND_POOL_SIZE, 4);
+K_MSGQ_DEFINE(vams_completion_queue, sizeof(struct vams_command_object *),
+	      VAMS_COMMAND_POOL_SIZE, 4);
 
 static const struct device *const command_portal =
 	DEVICE_DT_GET(DT_NODELABEL(command0));
@@ -48,11 +67,16 @@ static const struct device *const management =
 static struct k_thread vams_producer_thread;
 static struct k_thread vams_monitor_thread;
 static struct k_thread vams_mailbox_thread;
-static struct k_thread vams_command_thread;
+static struct k_thread vams_receiver_thread;
+static struct k_thread vams_validator_thread;
+static struct k_thread vams_scheduler_thread;
+static struct k_thread vams_completion_thread;
 static struct k_thread vams_health_thread;
 static atomic_t producer_epoch;
 static atomic_t monitor_epoch;
 static atomic_t mailbox_epoch;
+static uint32_t command_generation;
+static uint32_t command_sequence;
 
 static void vams_producer(void *unused1, void *unused2, void *unused3)
 {
@@ -124,33 +148,158 @@ static void vams_mailbox_service(void *unused1, void *unused2, void *unused3)
 	}
 }
 
-static void vams_command_service(void *unused1, void *unused2, void *unused3)
+static void vams_command_receiver(void *unused1, void *unused2, void *unused3)
 {
 	ARG_UNUSED(unused1);
 	ARG_UNUSED(unused2);
 	ARG_UNUSED(unused3);
 
 	for (;;) {
-		struct vams_submission submission;
-		struct vams_completion completion;
+		struct vams_command_object *command;
 		int status;
 
-		status = vams_command_receive(command_portal, &submission, K_FOREVER);
+		status = k_mem_slab_alloc(&vams_command_pool, (void **)&command,
+					  K_FOREVER);
 		__ASSERT_NO_MSG(status == 0);
-		vams_command_execute(&submission, &completion, k_uptime_get());
+		memset(command, 0, sizeof(*command));
+		status = vams_command_receive(command_portal, &command->submission,
+					      K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+		command_sequence++;
+		vams_scheduler_capture(command, command_generation,
+				       command_sequence, k_uptime_get());
+		status = k_msgq_put(&vams_validation_queue, &command, K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+	}
+}
+
+static void vams_command_validator(void *unused1, void *unused2, void *unused3)
+{
+	ARG_UNUSED(unused1);
+	ARG_UNUSED(unused2);
+	ARG_UNUSED(unused3);
+
+	for (;;) {
+		struct vams_command_object *command;
+		int status;
+
+		status = k_msgq_get(&vams_validation_queue, &command, K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+		vams_scheduler_transition(command, VAMS_COMMAND_SUBMITTED,
+					  VAMS_COMMAND_VALIDATING);
+		vams_command_execute(&command->submission, &command->completion,
+				     k_uptime_get());
+		if (sys_le16_to_cpu(command->completion.status) !=
+		    VAMS_STATUS_SUCCESS) {
+			vams_scheduler_transition(command, VAMS_COMMAND_VALIDATING,
+						  VAMS_COMMAND_COMPLETED_ERROR);
+			status = k_msgq_put(&vams_completion_queue, &command,
+						 K_FOREVER);
+		} else {
+			vams_scheduler_transition(command, VAMS_COMMAND_VALIDATING,
+						  VAMS_COMMAND_QUEUED);
+			status = k_msgq_put(&vams_ready_queue, &command, K_FOREVER);
+		}
+		__ASSERT_NO_MSG(status == 0);
+	}
+}
+
+static size_t vams_scheduler_select(
+	struct vams_command_object *const ready[VAMS_COMMAND_POOL_SIZE],
+	size_t count)
+{
+	size_t selected = 0U;
+
+	for (size_t index = 1U; index < count; index++) {
+		if (vams_scheduler_precedes(ready[index], ready[selected])) {
+			selected = index;
+		}
+	}
+	return selected;
+}
+
+static void vams_command_scheduler(void *unused1, void *unused2, void *unused3)
+{
+	struct vams_command_object *ready[VAMS_COMMAND_POOL_SIZE];
+	size_t ready_count = 0U;
+
+	ARG_UNUSED(unused1);
+	ARG_UNUSED(unused2);
+	ARG_UNUSED(unused3);
+
+	for (;;) {
+		struct vams_command_object *command;
+		size_t selected;
+		int status;
+
+		if (ready_count == 0U) {
+			status = k_msgq_get(&vams_ready_queue, &ready[0], K_FOREVER);
+			__ASSERT_NO_MSG(status == 0);
+			ready_count = 1U;
+		}
+		while (ready_count < ARRAY_SIZE(ready) &&
+		       k_msgq_get(&vams_ready_queue, &ready[ready_count],
+				    K_NO_WAIT) == 0) {
+			ready_count++;
+		}
+		selected = vams_scheduler_select(ready, ready_count);
+		command = ready[selected];
+		ready_count--;
+		ready[selected] = ready[ready_count];
+
+		if (CONFIG_VAMS_SCHEDULER_TEST_DELAY_MS > 0) {
+			k_sleep(K_MSEC(CONFIG_VAMS_SCHEDULER_TEST_DELAY_MS));
+		}
+		if (command->generation != command_generation) {
+			vams_scheduler_cancel(command, k_uptime_get());
+		} else if (vams_scheduler_deadline_expired(command,
+							 k_uptime_get())) {
+			vams_scheduler_transition(command, VAMS_COMMAND_QUEUED,
+						  VAMS_COMMAND_ABORTING);
+			vams_scheduler_timeout(command, k_uptime_get());
+		} else {
+			vams_scheduler_transition(command, VAMS_COMMAND_QUEUED,
+						  VAMS_COMMAND_RUNNING);
+			vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
+						  VAMS_COMMAND_COMPLETED);
+		}
+		status = k_msgq_put(&vams_completion_queue, &command, K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+	}
+}
+
+static void vams_command_completion(void *unused1, void *unused2, void *unused3)
+{
+	ARG_UNUSED(unused1);
+	ARG_UNUSED(unused2);
+	ARG_UNUSED(unused3);
+
+	for (;;) {
+		struct vams_command_object *command;
+		enum vams_command_state terminal_state;
+		int status;
+
+		status = k_msgq_get(&vams_completion_queue, &command, K_FOREVER);
+		__ASSERT_NO_MSG(status == 0);
+		terminal_state = command->state;
 		do {
-			status = vams_command_complete(command_portal, &completion);
+			status = vams_command_complete(command_portal,
+						       &command->completion);
 			if (status == -EBUSY) {
 				k_sleep(K_MSEC(1));
 			}
 		} while (status == -EBUSY);
 		__ASSERT_NO_MSG(status == 0);
+		vams_scheduler_mark_published(command);
 		printk("Command: id=0x%08" PRIx32 " status=%" PRIu16
 		       " error=%" PRIu16 " cookie=0x%016" PRIx64 "\n",
-		       sys_le32_to_cpu(completion.command_id),
-		       sys_le16_to_cpu(completion.status),
-		       sys_le16_to_cpu(completion.error_code),
-		       sys_le64_to_cpu(completion.user_cookie));
+		       sys_le32_to_cpu(command->completion.command_id),
+		       sys_le16_to_cpu(command->completion.status),
+		       sys_le16_to_cpu(command->completion.error_code),
+		       sys_le64_to_cpu(command->completion.user_cookie));
+		vams_scheduler_transition(command, terminal_state, VAMS_COMMAND_FREE);
+		memset(command, 0, sizeof(*command));
+		k_mem_slab_free(&vams_command_pool, command);
 	}
 }
 
@@ -223,6 +372,7 @@ int main(void)
 	__ASSERT_NO_MSG(device_is_ready(command_portal));
 
 	vams_management_snapshot(management, &boot_snapshot);
+	command_generation = boot_snapshot.reset_generation;
 	printk("Reset: reason=%" PRIu32 " watchdog_count=%" PRIu32
 	       " generation=%" PRIu32 "\n", boot_snapshot.reset_reason,
 	       boot_snapshot.watchdog_reset_count,
@@ -256,11 +406,32 @@ int main(void)
 	status = k_thread_name_set(&vams_mailbox_thread, "vams_mailbox");
 	__ASSERT_NO_MSG(status == 0);
 
-	(void)k_thread_create(&vams_command_thread, vams_command_stack,
-			      K_THREAD_STACK_SIZEOF(vams_command_stack),
-			      vams_command_service, NULL, NULL, NULL,
-			      VAMS_TASK_PRIORITY, 0, K_FOREVER);
-	status = k_thread_name_set(&vams_command_thread, "vams_command");
+	(void)k_thread_create(&vams_completion_thread, vams_completion_stack,
+			      K_THREAD_STACK_SIZEOF(vams_completion_stack),
+			      vams_command_completion, NULL, NULL, NULL,
+			      VAMS_COMPLETION_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_completion_thread, "vams_completion");
+	__ASSERT_NO_MSG(status == 0);
+
+	(void)k_thread_create(&vams_scheduler_thread, vams_scheduler_stack,
+			      K_THREAD_STACK_SIZEOF(vams_scheduler_stack),
+			      vams_command_scheduler, NULL, NULL, NULL,
+			      VAMS_SCHEDULER_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_scheduler_thread, "vams_scheduler");
+	__ASSERT_NO_MSG(status == 0);
+
+	(void)k_thread_create(&vams_validator_thread, vams_validator_stack,
+			      K_THREAD_STACK_SIZEOF(vams_validator_stack),
+			      vams_command_validator, NULL, NULL, NULL,
+			      VAMS_VALIDATOR_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_validator_thread, "vams_validator");
+	__ASSERT_NO_MSG(status == 0);
+
+	(void)k_thread_create(&vams_receiver_thread, vams_receiver_stack,
+			      K_THREAD_STACK_SIZEOF(vams_receiver_stack),
+			      vams_command_receiver, NULL, NULL, NULL,
+			      VAMS_RECEIVER_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_receiver_thread, "vams_receiver");
 	__ASSERT_NO_MSG(status == 0);
 
 	(void)k_thread_create(&vams_health_thread, vams_health_stack,
@@ -271,11 +442,14 @@ int main(void)
 	__ASSERT_NO_MSG(status == 0);
 
 	printk("Tasks: producer -> message queue -> monitor\n");
-	printk("Services: command portal, mailbox, watchdog, reset telemetry\n");
+	printk("Services: fixed-pool command scheduler, mailbox, watchdog, reset telemetry\n");
 	k_thread_start(&vams_monitor_thread);
 	k_thread_start(&vams_producer_thread);
 	k_thread_start(&vams_mailbox_thread);
-	k_thread_start(&vams_command_thread);
+	k_thread_start(&vams_completion_thread);
+	k_thread_start(&vams_scheduler_thread);
+	k_thread_start(&vams_validator_thread);
+	k_thread_start(&vams_receiver_thread);
 	k_thread_start(&vams_health_thread);
 
 	return 0;

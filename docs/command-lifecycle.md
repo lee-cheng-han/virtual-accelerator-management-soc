@@ -16,12 +16,15 @@ Terminal results wait in the completion service until CQ publication, then the
 object returns to FREE. `COMPLETED_ERROR` includes validation and execution
 failure; status/error fields distinguish them.
 
-The current integrated implementation realizes the
-VALIDATING→RUNNING→terminal slice for one command through the private firmware
-bridge and QEMU virtual-time engine. `ENGINE_BUSY`, absolute deadline expiry,
-queue-reset cancellation, generation checking, and clean post-reset recovery
-are executable. A separate firmware scheduler queue, abort handshake, and
-engine-only reset remain planned.
+The integrated implementation realizes firmware
+FREE→SUBMITTED→VALIDATING→QUEUED→RUNNING→terminal ownership with a fixed slab
+and bounded queues, followed by the QEMU virtual-time engine. Firmware queued
+expiry, QEMU `ENGINE_BUSY`, engine deadline expiry, queue-reset cancellation,
+generation checking, exactly-once publication, and clean recovery commands are
+executable. A running-result event and abort handshake do not yet share one
+firmware protocol. Engine-only reset is independently executable in QEMU:
+active work receives one reset result, the private engine epoch advances,
+queued work survives, and the stale callback is suppressed.
 
 ## Transition ownership and invariants
 

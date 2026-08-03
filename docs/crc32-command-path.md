@@ -27,14 +27,14 @@ or ABI-owned state.
 ## DMA and ordering
 
 The endpoint independently revalidates the firmware-authorized descriptor,
-allocates at most 16 MiB, and DMA-reads the complete source before computing the
-CRC. The buffer is released before completion publication. An allocation or
+allocates one 64 KiB buffer, and carries CRC state across bounded source reads.
+The buffer is released before completion publication. An allocation or
 independent-validation failure reports `FAILED/ENGINE`; an inaccessible source
 reports `FAILED/DMA_READ`. Failures other than CRC mismatch return zero CRC.
 
 The implementation is single-command. Dispatch, deadlines, and reset
 cancellation are asynchronous in virtual time, while calculation remains one
-callback. Chunked calculation, abort, hardware acceleration, and performance
+callback. Mid-command abort, hardware acceleration, and physical-performance
 claims remain future work.
 
 ## Validation

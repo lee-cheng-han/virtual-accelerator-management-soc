@@ -19,8 +19,9 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 | **9 — Stress/performance** | Model/property queue tests, ring wrap, million-command and long-duration runs, repeated reset, histogram, throughput, stack/SRAM use, watchdog margin and queue high-water report. |
 | **10 — CI/demo** | Pinned reproducible builds, compatibility matrix, coverage/static analysis/fuzzing and layered tests in CI; unified trace export; `make demo` boots, submits, verifies, faults, recovers, and reports PASS/FAIL. |
 
-Current gate: DMA and engine execution are in progress. Command transport is
-complete. In addition to coherent PCI
+Current gate: deterministic fault injection. Scheduling and recovery are
+complete.
+In addition to coherent PCI
 SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
 validates, and completes valid and unsupported-version NOPs. The Linux driver
@@ -37,8 +38,17 @@ Virtual-time asynchronous dispatch now exposes BUSY, enforces command deadlines
 before payload access, and cancels reset-generation callbacks without stale CQ
 publication. Executable queue/bridge/engine invariants and replayable raw
 descriptor/BAR mutation regressions now cover the implemented QEMU surface.
-Throughput evidence remains before this gate closes. Abort handshakes,
-disconnect handling, and broader recovery remain in the recovery gate.
+Payload DMA uses bounded 64 KiB chunks, and a hardware-free smoke verifies
+the full 16 MiB transfer with an independent CRC while reporting explicitly
+virtual-model throughput. Zephyr owns an eight-object fixed pool and
+four-task command pipeline with asserted states, earliest-deadline dispatch,
+queued expiry, generation cancellation, exactly-once publication, and clean
+post-timeout recovery. QEMU engine-only reset terminates active work exactly
+once, advances a private epoch without changing host queue generation, preserves
+queued work, and suppresses the cancelled callback. Queue and device recovery
+remain generation-scoped. Firmware running-result acknowledgment and bridge
+disconnect reconciliation remain improvement work, while debug-gated fault
+controls and named race checkpoints are the next acceptance gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
@@ -65,16 +75,39 @@ explicitly planned and are not counted as implemented.
 
 | Improvement | Applied to completed work | Remaining acceptance work |
 |---|---|---|
-| Executable state invariants | QEMU queue indices, bridge/engine ownership, BUSY equivalence, deadlines, and reset generation are fail-fast assertions. | Firmware command-pool ownership, exactly-once counters, mapping lifetime, and engine epoch. |
+| Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool state transitions/exactly-once publication are fail-fast assertions. | Host mapping lifetime and firmware running-result ownership. |
 | Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
-| Real firmware scheduler | Current Zephyr firmware owns descriptor validation and authorization. | Fixed object pool plus validator, scheduler, DMA, completion, and recovery queues. |
-| Timeout and recovery | Virtual-time deadline, timeout-before-payload, BUSY reset cancellation, generation suppression, and clean recovery NOP. | Abort handshake, engine-only reset, bridge disconnect, escalation counters, and firmware-owned deadline scheduling. |
-| Chunked DMA | Transfer limits, directional errors, guarded integrity, and all-or-nothing completion are tested. | Bounded chunks, cancellation points, Nth-chunk faults, and memory-pressure evidence. |
+| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, and completion tasks connected by bounded queues. | DMA-result and recovery-manager tasks, engine event protocol, and CQ-backpressure watermark. |
+| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, and firmware queued deadlines/generation cancellation all have clean recovery commands. | Firmware running abort handshake, bridge disconnect, and escalation counters. |
+| Chunked DMA | Every payload opcode uses 64 KiB chunks; maximum-transfer copy/CRC, cross-boundary fill/vector, directional errors, guards, and v1 completion reporting are tested. | Persisted cancellation points, Nth-chunk faults, and memory-pressure evidence. |
 | Deterministic faults | Natural timeout and reset-after-BUSY race are deterministic. | Debug-gated DMA/IRQ/engine/task/mailbox faults and named pause/release checkpoints. |
 | Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
+| Memory-order verification | Queue transport documents host/device ownership and QEMU DMA ordering; model and integration tests exercise the normal publication chain. | Independently delayed release/acquire checkpoints from descriptor write through CQ visibility, interrupt, and host consumption. |
 | Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
 | Stress/performance | Queue model covers wrap, backpressure, errors, interrupts, and reset under four seeds. | Million-command/reset qualification, latency distributions, stack/SRAM high-water, and watchdog margin. |
-| Reproducible CI/demo | Generated ABI checks, strict builds, and source hygiene run in lightweight CI; hardware-free fuzz regressions have replayable seeds. | Pinned images/toolchains, sanitizer/static-analysis CI, compatibility matrix, evidence archive, and unified demo. |
+| Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; debug faults are not advertised as production features. | DMA-aperture enforcement, per-process buffer ownership, privilege checks, debug locking, hostile-parser coverage, and reset/removal isolation tests. |
+| Requirement traceability | Generated ABI artifacts and normative documents define the current cross-layer contract. | Stable requirement IDs linked to design, implementation, test, CI evidence, and explicit limitation in a generated compliance matrix. |
+| Reproducible CI and demo | Generated ABI checks, strict builds, and source hygiene run in lightweight CI; hardware-free fuzz regressions have replayable seeds. | Pinned images/toolchains, sanitizer/static-analysis CI, compatibility matrix, evidence archive, and one-command boot/submit/verify/fault/recover report. |
+
+### Near-term implementation order
+
+1. Add deterministic debug-gated faults and named race-window checkpoints, with
+   a clean command required after every injected failure.
+2. Complete the firmware-to-engine running-result, abort/acknowledgment,
+   disconnect-reconciliation, and bounded recovery-escalation protocol.
+3. Extend the Linux API with registered payload mappings, asynchronous
+   submit/wait, `poll`/`epoll`, per-process ownership, and safe close/remove
+   cancellation; enforce DMA apertures and privilege boundaries at the same
+   time.
+4. Add independently controlled memory-order tests and the merged structured
+   trace needed to diagnose failures across firmware, QEMU, kernel, and
+   userspace.
+5. Qualify with million-command, reset-storm, concurrent-process, process-exit,
+   memory-pressure, and long-duration watchdog runs while collecting latency,
+   queue, stack, SRAM, and recovery evidence.
+6. Pin the build matrix, enable sanitizers/static analysis/coverage-guided
+   fuzzing, generate the requirements-to-evidence matrix, and deliver a single
+   hardware-free `make demo` with machine-readable PASS/FAIL output.
 
 ## Release-quality engineering tracks
 

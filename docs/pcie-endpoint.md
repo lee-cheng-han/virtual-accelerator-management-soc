@@ -6,8 +6,9 @@ The QEMU type `vams-pcie` is a PCI Express processing-accelerator endpoint. It
 provides the host-visible identity/control foundation plus one coherent command
 queue. The private dual-QEMU bridge and all firmware-owned v1 payload operations
 now work in integration tests. A virtual-time engine supplies BUSY state,
-deadline completion, and reset-safe callback cancellation. Host payload UAPI,
-chunked DMA, and engine-control registers remain unavailable.
+deadline completion, bounded payload DMA, reset-safe callback cancellation, and
+engine-only recovery. Host payload UAPI and firmware-issued abort control remain
+unavailable.
 
 | PCI field | Value |
 |---|---:|
@@ -32,7 +33,7 @@ The following registers implement the behavior defined by the
 | `0x004` | `VAMS_HW_IF_VERSION` | `0x00010000` |
 | `0x008` | `VAMS_FW_VERSION` | Zero until firmware integration |
 | `0x00c` | `VAMS_DESC_VERSION` | Descriptor format 1 |
-| `0x010` | `VAMS_CAPABILITIES` | `0x00000023`, DMA, MSI-X, polling-safe CQ |
+| `0x010` | `VAMS_CAPABILITIES` | `0x00000033`, DMA, MSI-X, engine reset, polling-safe CQ |
 | `0x014` | `VAMS_MAX_TRANSFER` | 16 MiB architectural limit |
 | `0x018` | `VAMS_QUEUE_LIMITS` | Depth range 16–1024 |
 | `0x01c` | `VAMS_DEVICE_STATUS` | READY or RESETTING |
@@ -44,10 +45,18 @@ The following registers implement the behavior defined by the
 | `0x304` | `VAMS_INTR_MASK` | Four source masks |
 | `0x308` | `VAMS_INTR_FORCE` | Deterministic source assertion |
 | `0x30c` | `VAMS_INTR_COALESCE` | Reset value 1 only |
+| `0x500` | `VAMS_ENGINE_STATUS` | BUSY plus sticky engine-error summary |
+| `0x504` | `VAMS_ENGINE_CONTROL` | Reads zero; host writes rejected |
+| `0x508` | `VAMS_ENGINE_COMMAND_ID` | Active command ID, zero when idle |
+| `0x50c` | `VAMS_ENGINE_ERROR` | Read-only DMA direction/timeout evidence |
+| `0x510` | `VAMS_ENGINE_EPOCH` | Private cancellation epoch |
+| `0x60c` | `VAMS_RESET_REQUEST` | Engine-only reset request implemented |
+| `0x610` | `VAMS_LAST_RESET_REASON` | Power-on/device/queue/engine reason |
+| `0x614` | `VAMS_RESET_STATUS` | Zero for synchronous engine reset |
 
 The SQ block at `0x100–0x11f` and CQ block at `0x200–0x21f` implement the
-normative base, depth, index, doorbell, control, and status registers. Other
-BAR0 offsets are deliberately unimplemented. They return all ones,
+normative base, depth, index, doorbell, control, and status registers. BAR0
+offsets outside the listed subset are deliberately unimplemented. They return all ones,
 ignore writes, and set `VAMS_ERR_ILLEGAL_MMIO`. Accesses that are not aligned
 32-bit operations behave the same way. RO writes, reserved-bit writes, and
 invalid configuration requests set their distinct normative error bits.
@@ -75,6 +84,11 @@ The PCI configuration, MSI-X table/PBA, BAR0 state, in-progress reset timer, and
 active engine command/timer/deadline/generation are migration state. Live
 migration is not an accepted platform feature until an end-to-end migration
 regression exists.
+
+Writing the engine bit in `RESET_REQUEST` synchronously cancels active work,
+publishes `RESET/RESET`, increments the private engine epoch, records
+host-engine as the reset reason, and preserves the queue generation and pending
+descriptors. A stale callback cannot modify payload or publish another CQ entry.
 
 ## Validation
 

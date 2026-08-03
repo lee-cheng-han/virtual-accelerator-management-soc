@@ -16,10 +16,10 @@ captures the single fill byte before writing the destination. Flags,
 ## Execution and completion
 
 After successful firmware authorization, the endpoint independently validates
-the descriptor, allocates a bounded private buffer, DMA-reads exactly one source
-byte, fills the private buffer, and DMA-writes exactly `length` destination
-bytes. The destination write completes before the completion is DMA-written,
-the CQ tail advances, or MSI-X is raised.
+the descriptor, allocates one 64 KiB private buffer, DMA-reads exactly one
+source byte, and constructs and writes bounded destination chunks. Every chunk
+completes before the completion is DMA-written, the CQ tail advances, or MSI-X
+is raised.
 
 Success reports `SUCCESS/NONE` with `bytes_processed=length`. Allocation or
 independent validation failure reports `FAILED/ENGINE`, an inaccessible source
@@ -28,9 +28,9 @@ reports `FAILED/DMA_READ`, and an inaccessible destination reports
 contents are unspecified, matching the v1 all-or-nothing reporting contract.
 
 The engine remains single-command. Dispatch, deadlines, and reset cancellation
-are asynchronous in virtual time, while the payload callback remains
-monolithic. Chunked work, abort, and Linux userspace payload submission remain
-future work.
+are asynchronous in virtual time, while all chunks still execute inside one
+payload callback. Mid-command abort and Linux userspace payload submission
+remain future work.
 
 ## Validation
 

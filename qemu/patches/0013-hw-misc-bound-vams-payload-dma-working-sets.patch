@@ -1,0 +1,201 @@
+Subject: [PATCH] hw/misc: bound VAMS payload DMA working sets
+
+Process copy, fill, CRC32, and vector-add payloads in 64 KiB chunks instead of
+allocating the complete command length. Keep CRC state across chunks and limit
+the largest vector working set to two chunks while preserving the existing
+completion and directional-error contract.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -31,6 +31,7 @@
+ #define VAMS_ENGINE_EXECUTION_NS \
+     (2 * VAMS_NANOSECONDS_PER_MILLISECOND)
+ #define VAMS_DEFAULT_TIMEOUT_MS 30000
++#define VAMS_DMA_CHUNK_SIZE (64 * 1024)
+ 
+ enum {
+     VAMS_REG_DEVICE_ID = 0x000,
+@@ -449,9 +450,9 @@ static void vams_pcie_complete_dma_error(struct vams_completion *completion,
+     completion->result_crc = 0;
+ }
+ 
+-static uint32_t vams_pcie_crc32(const uint8_t *buffer, uint32_t length)
++static uint32_t vams_pcie_crc32_update(uint32_t crc, const uint8_t *buffer,
++                                      uint32_t length)
+ {
+-    uint32_t crc = UINT32_MAX;
+     uint32_t index;
+ 
+     for (index = 0; index < length; index++) {
+@@ -464,7 +465,7 @@ static uint32_t vams_pcie_crc32(const uint8_t *buffer, uint32_t length)
+             crc = (crc >> 1) ^ (UINT32_C(0xedb88320) & mask);
+         }
+     }
+-    return ~crc;
++    return crc;
+ }
+ 
+ static void vams_pcie_execute_payload(
+@@ -473,8 +474,13 @@ static void vams_pcie_execute_payload(
+ {
+     PCIDevice *pdev = PCI_DEVICE(s);
+     uint32_t length = le32_to_cpu(submission->length);
++    uint32_t offset = 0;
++    uint32_t crc = UINT32_MAX;
++    uint32_t allocation_size;
+     uint8_t *buffer;
+-    uint8_t *destination_buffer;
++    uint8_t *destination_buffer = NULL;
++    uint8_t fill_value = 0;
++    uint16_t dma_error = VAMS_ERR_NONE;
+     MemTxResult result;
+ 
+     if (le16_to_cpu(completion->status) != VAMS_STATUS_SUCCESS ||
+@@ -489,72 +495,95 @@ static void vams_pcie_execute_payload(
+         return;
+     }
+ 
+-    buffer = g_try_malloc(length);
++    allocation_size = MIN(length, VAMS_DMA_CHUNK_SIZE);
++    buffer = g_try_malloc(allocation_size);
+     if (!buffer) {
+         vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
+         return;
+     }
+-    result = pci_dma_read(pdev, le64_to_cpu(submission->source_dma), buffer,
+-                          submission->opcode == VAMS_OP_MEM_FILL ? 1 : length);
+-    if (result != MEMTX_OK) {
+-        vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_READ);
+-        g_free(buffer);
+-        return;
+-    }
+     if (submission->opcode == VAMS_OP_MEM_FILL) {
+-        memset(buffer, buffer[0], length);
+-    }
+-    if (submission->opcode == VAMS_OP_CRC32) {
+-        uint32_t crc = vams_pcie_crc32(buffer, length);
+-
+-        g_free(buffer);
+-        completion->result_crc = cpu_to_le32(crc);
+-        if ((submission->flags & VAMS_SUB_F_VERIFY_CRC) &&
+-            crc != le32_to_cpu(submission->expected_crc)) {
+-            completion->status = cpu_to_le16(VAMS_STATUS_FAILED);
+-            completion->error_code = cpu_to_le16(VAMS_ERR_CRC_MISMATCH);
+-            completion->bytes_processed = 0;
+-            return;
++        result = pci_dma_read(pdev, le64_to_cpu(submission->source_dma),
++                              &fill_value, sizeof(fill_value));
++        if (result != MEMTX_OK) {
++            dma_error = VAMS_ERR_DMA_READ;
++            goto out;
++        }
++    } else if (submission->opcode == VAMS_OP_VECTOR_ADD) {
++        destination_buffer = g_try_malloc(allocation_size);
++        if (!destination_buffer) {
++            dma_error = VAMS_ERR_ENGINE;
++            goto out;
+         }
+-        completion->bytes_processed = cpu_to_le32(length);
+-        return;
+     }
+-    if (submission->opcode == VAMS_OP_VECTOR_ADD) {
+-        uint32_t index;
+ 
+-        destination_buffer = g_try_malloc(length);
+-        if (!destination_buffer) {
+-            g_free(buffer);
+-            vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
+-            return;
++    while (offset < length) {
++        uint32_t chunk_size = MIN(length - offset, VAMS_DMA_CHUNK_SIZE);
++
++        if (submission->opcode == VAMS_OP_MEM_FILL) {
++            memset(buffer, fill_value, chunk_size);
++        } else {
++            result = pci_dma_read(
++                pdev, le64_to_cpu(submission->source_dma) + offset,
++                buffer, chunk_size);
++            if (result != MEMTX_OK) {
++                dma_error = VAMS_ERR_DMA_READ;
++                goto out;
++            }
+         }
+-        result = pci_dma_read(pdev,
+-                              le64_to_cpu(submission->destination_dma),
+-                              destination_buffer, length);
+-        if (result != MEMTX_OK) {
+-            g_free(destination_buffer);
+-            g_free(buffer);
+-            vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_READ);
+-            return;
++        if (submission->opcode == VAMS_OP_CRC32) {
++            crc = vams_pcie_crc32_update(crc, buffer, chunk_size);
++            offset += chunk_size;
++            continue;
+         }
+-        for (index = 0; index < length; index += sizeof(uint32_t)) {
+-            uint32_t source_value = ldl_le_p(buffer + index);
+-            uint32_t destination_value =
+-                ldl_le_p(destination_buffer + index);
+-            uint32_t sum = source_value + destination_value;
++        if (submission->opcode == VAMS_OP_VECTOR_ADD) {
++            uint32_t index;
++
++            result = pci_dma_read(
++                pdev, le64_to_cpu(submission->destination_dma) + offset,
++                destination_buffer, chunk_size);
++            if (result != MEMTX_OK) {
++                dma_error = VAMS_ERR_DMA_READ;
++                goto out;
++            }
++            for (index = 0; index < chunk_size; index += sizeof(uint32_t)) {
++                uint32_t source_value = ldl_le_p(buffer + index);
++                uint32_t destination_value =
++                    ldl_le_p(destination_buffer + index);
+ 
+-            stl_le_p(destination_buffer + index, sum);
++                stl_le_p(destination_buffer + index,
++                         source_value + destination_value);
++            }
++        }
++        result = pci_dma_write(
++            pdev, le64_to_cpu(submission->destination_dma) + offset,
++            submission->opcode == VAMS_OP_VECTOR_ADD ?
++                destination_buffer : buffer,
++            chunk_size);
++        if (result != MEMTX_OK) {
++            dma_error = VAMS_ERR_DMA_WRITE;
++            goto out;
+         }
+-        g_free(buffer);
+-        buffer = destination_buffer;
++        offset += chunk_size;
+     }
+-    result = pci_dma_write(pdev, le64_to_cpu(submission->destination_dma),
+-                           buffer, length);
++
++out:
++    g_free(destination_buffer);
+     g_free(buffer);
+-    if (result != MEMTX_OK) {
+-        vams_pcie_complete_dma_error(completion, VAMS_ERR_DMA_WRITE);
++    if (dma_error != VAMS_ERR_NONE) {
++        vams_pcie_complete_dma_error(completion, dma_error);
+         return;
+     }
++    if (submission->opcode == VAMS_OP_CRC32) {
++        crc = ~crc;
++        completion->result_crc = cpu_to_le32(crc);
++        if ((submission->flags & VAMS_SUB_F_VERIFY_CRC) &&
++            crc != le32_to_cpu(submission->expected_crc)) {
++            completion->status = cpu_to_le16(VAMS_STATUS_FAILED);
++            completion->error_code = cpu_to_le16(VAMS_ERR_CRC_MISMATCH);
++            completion->bytes_processed = 0;
++            return;
++        }
++    }
+     completion->bytes_processed = cpu_to_le32(length);
+ }
+ 

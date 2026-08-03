@@ -15,6 +15,8 @@ SPEC_DOCS := README.md \
 	docs/crc32-command-path.md docs/vector-add-command-path.md
 SPEC_DOCS += docs/asynchronous-engine.md
 SPEC_DOCS += docs/assurance.md
+SPEC_DOCS += docs/chunked-dma.md
+SPEC_DOCS += docs/firmware-scheduler.md
 
 SPEC_DOCS += docs/linux-uapi.md
 
@@ -33,17 +35,22 @@ ZEPHYR_BASE ?= $(CURDIR)/build/zephyrproject/zephyr
 ZEPHYR_VENV ?= $(CURDIR)/build/zephyr-venv
 ZEPHYR_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr
 ZEPHYR_WATCHDOG_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-watchdog
+ZEPHYR_SCHEDULER_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-scheduler
 VAMS_ZEPHYR_FIRMWARE ?= $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
+VAMS_SCHEDULER_FIRMWARE ?= $(ZEPHYR_SCHEDULER_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_DESCRIPTOR_FUZZ_SEED ?= 0xd35c0123
 VAMS_BAR_FUZZ_SEED ?= 0xba4f0223
 VAMS_FUZZ_ITERATIONS ?= 4096
 
-.PHONY: help check check-docs abi-check firmware smoke zephyr-prepare zephyr \
-	zephyr-smoke zephyr-watchdog management-smoke management-mmio-smoke \
+.PHONY: help check check-docs abi-check firmware-scheduler-unit firmware smoke zephyr-prepare zephyr \
+	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout \
+	management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
-	vector-add-smoke async-engine-smoke \
+	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
+	payload-throughput-smoke \
+	dma-engine-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
 	descriptor-fuzz bar-fuzz fuzz-smoke source-check assurance-smoke \
@@ -55,6 +62,8 @@ help:
 	  '' \
 	  '  make check       Validate specifications and source hygiene' \
 	  '  make firmware    Build the RV32 bare-metal firmware' \
+	  '  make firmware-scheduler-unit' \
+	  '                   Verify firmware EDF ordering on the host' \
 	  '  make smoke       Boot the firmware and verify its UART transcript' \
 	  '  make zephyr-prepare' \
 	  '                   Fetch pinned Zephyr build dependencies' \
@@ -82,6 +91,12 @@ help:
 	  '                   Verify firmware-owned vector arithmetic and DMA' \
 	  '  make async-engine-smoke' \
 	  '                   Verify deadlines and reset-safe engine cancellation' \
+	  '  make scheduler-recovery-smoke' \
+	  '                   Verify firmware queued timeout and clean recovery' \
+	  '  make payload-throughput-smoke' \
+	  '                   Verify bounded DMA and report virtual throughput' \
+	  '  make dma-engine-smoke' \
+	  '                   Run firmware payload and bounded-engine validation' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make queue-model-smoke' \
@@ -103,7 +118,7 @@ help:
 	  '  make demo        Explain full-demo availability' \
 	  '  make clean       Remove generated output'
 
-check: check-docs abi-check
+check: check-docs abi-check firmware-scheduler-unit
 
 check-docs:
 	@set -eu; \
@@ -113,8 +128,8 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'All v1 payload operations implemented' README.md; \
-	grep -q 'Asynchronous engine deadlines implemented' README.md; \
+	grep -q 'Scheduling and recovery complete' README.md; \
+	grep -q 'bounded 64 KiB DMA working chunk' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
@@ -129,6 +144,14 @@ abi-check:
 	$(HOST_CLANG) -std=c11 -Wall -Wextra -Wpedantic -Werror -Iinclude \
 		tests/abi/test-vams-abi.c -o build/tests/test-vams-abi-clang
 	./build/tests/test-vams-abi-clang
+
+firmware-scheduler-unit:
+	@mkdir -p build/tests
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror \
+		-Iinclude -Ifirmware/include \
+		tests/firmware/test-vams-scheduler.c \
+		-o build/tests/test-vams-scheduler
+	./build/tests/test-vams-scheduler
 
 firmware:
 	$(MAKE) -C firmware/baremetal CROSS_COMPILE="$(CROSS_COMPILE)"
@@ -185,6 +208,24 @@ zephyr-watchdog:
 	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
 	cmake --build "$(ZEPHYR_WATCHDOG_BUILD_DIR)"
 
+zephyr-scheduler-timeout:
+	@test -x "$(ZEPHYR_VENV)/bin/python" || { \
+		echo 'Zephyr environment missing; run make zephyr-prepare' >&2; \
+		exit 2; \
+	}
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	ZEPHYR_BASE="$(ZEPHYR_BASE)" \
+	ZEPHYR_TOOLCHAIN_VARIANT=cross-compile \
+	CROSS_COMPILE="$(CROSS_COMPILE)" \
+	cmake --fresh -S firmware -B "$(ZEPHYR_SCHEDULER_BUILD_DIR)" -G Ninja \
+		-DUSE_CCACHE=0 \
+		-DBOARD=vams_riscv \
+		-DBOARD_ROOT="$(CURDIR)/firmware" \
+		-DSOC_ROOT="$(CURDIR)/firmware" \
+		-DEXTRA_CONF_FILE=tests/scheduler-timeout.conf
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	cmake --build "$(ZEPHYR_SCHEDULER_BUILD_DIR)"
+
 management-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
@@ -226,6 +267,18 @@ vector-add-smoke: firmware-pcie-smoke
 
 async-engine-smoke: firmware-pcie-smoke
 
+scheduler-recovery-smoke: zephyr-scheduler-timeout
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	VAMS_SCHEDULER_FIRMWARE="$(VAMS_SCHEDULER_FIRMWARE)" \
+	./qemu/tests/smoke-vams-scheduler-recovery.py
+
+payload-throughput-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/performance/vams-payload-throughput.py
+
+dma-engine-smoke: firmware-pcie-smoke payload-throughput-smoke
+
 pcie-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/smoke-vams-pcie.sh
@@ -254,7 +307,8 @@ fuzz-smoke: descriptor-fuzz bar-fuzz
 
 source-check:
 	python3 -m py_compile scripts/*.py tests/abi/*.py \
-		qemu/tests/*.py qemu/tests/qtest/*.py qemu/tests/fuzz/*.py
+		qemu/tests/*.py qemu/tests/qtest/*.py qemu/tests/fuzz/*.py \
+		qemu/tests/performance/*.py
 	@set -eu; \
 	for script in scripts/*.sh qemu/tests/*.sh kernel/tests/*.sh; do \
 		sh -n "$$script"; \
@@ -338,6 +392,14 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0011-hw-misc-add-vams-asynchronous-engine.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0012-hw-misc-assert-vams-state-invariants.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0012-hw-misc-assert-vams-state-invariants.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0013-hw-misc-bound-vams-payload-dma-working-sets.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0013-hw-misc-bound-vams-payload-dma-working-sets.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

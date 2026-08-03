@@ -1,0 +1,256 @@
+Subject: [PATCH] hw/misc: add VAMS engine recovery controls
+
+Expose engine state, error, epoch, and reset diagnostics. An engine-only reset
+cancels the running timer, completes that command with RESET, advances a private
+epoch without changing the host reset generation, and resumes queued work.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -29,7 +29,7 @@
+ #define VAMS_DEVICE_RESET_DELAY_MS 1
+ #define VAMS_NANOSECONDS_PER_MILLISECOND INT64_C(1000000)
+ #define VAMS_ENGINE_EXECUTION_NS \
+-    (2 * VAMS_NANOSECONDS_PER_MILLISECOND)
++    (20 * VAMS_NANOSECONDS_PER_MILLISECOND)
+ #define VAMS_DEFAULT_TIMEOUT_MS 30000
+ #define VAMS_DMA_CHUNK_SIZE (64 * 1024)
+ 
+@@ -66,11 +66,20 @@ enum {
+     VAMS_REG_INTR_MASK = 0x304,
+     VAMS_REG_INTR_FORCE = 0x308,
+     VAMS_REG_INTR_COALESCE = 0x30c,
++    VAMS_REG_ENGINE_STATUS = 0x500,
++    VAMS_REG_ENGINE_CONTROL = 0x504,
++    VAMS_REG_ENGINE_COMMAND_ID = 0x508,
++    VAMS_REG_ENGINE_ERROR = 0x50c,
++    VAMS_REG_ENGINE_EPOCH = 0x510,
++    VAMS_REG_RESET_REQUEST = 0x60c,
++    VAMS_REG_LAST_RESET_REASON = 0x610,
++    VAMS_REG_RESET_STATUS = 0x614,
+ };
+ 
+ enum {
+     VAMS_CAP_DMA = BIT(0),
+     VAMS_CAP_MSIX = BIT(1),
++    VAMS_CAP_ENGINE_RESET = BIT(4),
+     VAMS_CAP_POLLING_CQ = BIT(5),
+     VAMS_STATUS_READY = BIT(0),
+     VAMS_STATUS_QUEUES_READY = BIT(2),
+@@ -95,6 +104,16 @@ enum {
+     VAMS_QUEUE_STATUS_ENABLED = BIT(0),
+     VAMS_QUEUE_STATUS_EMPTY = BIT(1),
+     VAMS_QUEUE_STATUS_FULL = BIT(2),
++    VAMS_ENGINE_STATUS_BUSY = BIT(0),
++    VAMS_ENGINE_STATUS_ERROR = BIT(3),
++    VAMS_ENGINE_ERROR_DMA_READ = BIT(0),
++    VAMS_ENGINE_ERROR_DMA_WRITE = BIT(1),
++    VAMS_ENGINE_ERROR_TIMEOUT = BIT(2),
++    VAMS_RESET_REQUEST_ENGINE = BIT(1),
++    VAMS_RESET_REASON_POWER_ON = 0,
++    VAMS_RESET_REASON_DEVICE = 1,
++    VAMS_RESET_REASON_QUEUE = 2,
++    VAMS_RESET_REASON_ENGINE = 3,
+ };
+ 
+ #define VAMS_CONTROL_DEFINED \
+@@ -145,6 +164,10 @@ struct VamsPcieState {
+     int64_t command_deadline_ns;
+     int64_t engine_finish_ns;
+     uint32_t engine_generation;
++    uint32_t engine_epoch;
++    uint32_t active_engine_epoch;
++    uint32_t engine_error;
++    uint32_t last_reset_reason;
+     bool engine_inflight;
+ };
+ 
+@@ -171,6 +194,7 @@ static void vams_pcie_check_invariants(const VamsPcieState *s)
+              s->engine_inflight);
+     if (s->engine_inflight) {
+         g_assert(s->engine_generation == s->reset_generation);
++        g_assert(s->active_engine_epoch == s->engine_epoch);
+         g_assert(s->command_deadline_ns > 0);
+         g_assert(s->engine_finish_ns > 0);
+     }
+@@ -298,6 +322,8 @@ static void vams_pcie_queue_reset(VamsPcieState *s)
+     s->intr_status &= ~VAMS_INTR_CQ;
+     msix_clr_pending(PCI_DEVICE(s), 0);
+     s->reset_generation++;
++    s->engine_epoch++;
++    s->last_reset_reason = VAMS_RESET_REASON_QUEUE;
+     vams_pcie_check_invariants(s);
+ }
+ 
+@@ -625,11 +651,23 @@ static void vams_pcie_engine_complete(void *opaque)
+         completion->error_code = cpu_to_le16(VAMS_ERR_TIMEOUT);
+         completion->bytes_processed = 0;
+         completion->result_crc = 0;
++        s->engine_error |= VAMS_ENGINE_ERROR_TIMEOUT;
+     } else {
+         vams_pcie_execute_payload(s, &s->bridge_submission.command,
+                                   completion);
++        switch (le16_to_cpu(completion->error_code)) {
++        case VAMS_ERR_DMA_READ:
++            s->engine_error |= VAMS_ENGINE_ERROR_DMA_READ;
++            break;
++        case VAMS_ERR_DMA_WRITE:
++            s->engine_error |= VAMS_ENGINE_ERROR_DMA_WRITE;
++            break;
++        default:
++            break;
++        }
+     }
+-    if (s->engine_generation != s->reset_generation) {
++    if (s->engine_generation != s->reset_generation ||
++        s->active_engine_epoch != s->engine_epoch) {
+         return;
+     }
+     if (!vams_pcie_publish_completion(s, completion)) {
+@@ -648,6 +686,7 @@ static void vams_pcie_schedule_engine(VamsPcieState *s)
+ 
+     s->engine_finish_ns = now + VAMS_ENGINE_EXECUTION_NS;
+     s->engine_generation = s->reset_generation;
++    s->active_engine_epoch = s->engine_epoch;
+     s->engine_inflight = true;
+     s->device_status |= VAMS_STATUS_ENGINE_BUSY;
+     expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
+@@ -655,6 +694,33 @@ static void vams_pcie_schedule_engine(VamsPcieState *s)
+     vams_pcie_check_invariants(s);
+ }
+ 
++static void vams_pcie_engine_reset(VamsPcieState *s)
++{
++    bool command_was_running = s->engine_inflight;
++    struct vams_completion *completion =
++        (struct vams_completion *)s->bridge_completion;
++
++    timer_del(s->engine_timer);
++    s->engine_inflight = false;
++    s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
++    s->engine_epoch++;
++    s->engine_error = 0;
++    s->last_reset_reason = VAMS_RESET_REASON_ENGINE;
++    if (command_was_running) {
++        completion->status = cpu_to_le16(VAMS_STATUS_RESET);
++        completion->error_code = cpu_to_le16(VAMS_ERR_RESET);
++        completion->bytes_processed = 0;
++        completion->result_crc = 0;
++        completion->device_timestamp = cpu_to_le64(
++            qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
++        if (!vams_pcie_publish_completion(s, completion)) {
++            return;
++        }
++    }
++    vams_pcie_check_invariants(s);
++    vams_pcie_process_sq(s);
++}
++
+ static int vams_pcie_bridge_can_receive(void *opaque)
+ {
+     VamsPcieState *s = opaque;
+@@ -809,6 +875,9 @@ static void vams_pcie_device_reset(VamsPcieState *s)
+ 
+     vams_pcie_cancel_bridge_request(s);
+     vams_pcie_cancel_engine(s);
++    s->engine_epoch++;
++    s->engine_error = 0;
++    s->last_reset_reason = VAMS_RESET_REASON_DEVICE;
+     s->device_control = 0;
+     s->device_status = VAMS_STATUS_RESETTING;
+     s->error_status &= VAMS_ERROR_FATAL;
+@@ -859,7 +928,8 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+     case VAMS_REG_DESC_VERSION:
+         return 1;
+     case VAMS_REG_CAPABILITIES:
+-        return VAMS_CAP_DMA | VAMS_CAP_MSIX | VAMS_CAP_POLLING_CQ;
++        return VAMS_CAP_DMA | VAMS_CAP_MSIX | VAMS_CAP_ENGINE_RESET |
++               VAMS_CAP_POLLING_CQ;
+     case VAMS_REG_MAX_TRANSFER:
+         return 0x01000000;
+     case VAMS_REG_QUEUE_LIMITS:
+@@ -915,6 +985,24 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         return 0;
+     case VAMS_REG_INTR_COALESCE:
+         return s->intr_coalesce;
++    case VAMS_REG_ENGINE_STATUS:
++        return (s->engine_inflight ? VAMS_ENGINE_STATUS_BUSY : 0) |
++               (s->engine_error ? VAMS_ENGINE_STATUS_ERROR : 0);
++    case VAMS_REG_ENGINE_CONTROL:
++        return 0;
++    case VAMS_REG_ENGINE_COMMAND_ID:
++        return s->engine_inflight ?
++            le32_to_cpu(s->bridge_submission.command.command_id) : 0;
++    case VAMS_REG_ENGINE_ERROR:
++        return s->engine_error;
++    case VAMS_REG_ENGINE_EPOCH:
++        return s->engine_epoch;
++    case VAMS_REG_RESET_REQUEST:
++        return 0;
++    case VAMS_REG_LAST_RESET_REASON:
++        return s->last_reset_reason;
++    case VAMS_REG_RESET_STATUS:
++        return 0;
+     default:
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -964,6 +1052,13 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+     case VAMS_REG_CQ_HEAD:
+     case VAMS_REG_CQ_TAIL:
+     case VAMS_REG_CQ_STATUS:
++    case VAMS_REG_ENGINE_STATUS:
++    case VAMS_REG_ENGINE_CONTROL:
++    case VAMS_REG_ENGINE_COMMAND_ID:
++    case VAMS_REG_ENGINE_ERROR:
++    case VAMS_REG_ENGINE_EPOCH:
++    case VAMS_REG_LAST_RESET_REASON:
++    case VAMS_REG_RESET_STATUS:
+         vams_pcie_write_ro(s);
+         return;
+     case VAMS_REG_DEVICE_CONTROL:
+@@ -1158,6 +1253,13 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+         }
+         s->intr_coalesce = value32;
+         return;
++    case VAMS_REG_RESET_REQUEST:
++        if (value32 != VAMS_RESET_REQUEST_ENGINE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        vams_pcie_engine_reset(s);
++        return;
+     default:
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -1184,7 +1286,7 @@ static const MemoryRegionOps vams_pcie_bar0_ops = {
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 5,
++    .version_id = 6,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+@@ -1223,6 +1325,10 @@ static const VMStateDescription vams_pcie_vmstate = {
+         VMSTATE_INT64_V(engine_finish_ns, VamsPcieState, 5),
+         VMSTATE_UINT32_V(engine_generation, VamsPcieState, 5),
+         VMSTATE_BOOL_V(engine_inflight, VamsPcieState, 5),
++        VMSTATE_UINT32_V(engine_epoch, VamsPcieState, 6),
++        VMSTATE_UINT32_V(active_engine_epoch, VamsPcieState, 6),
++        VMSTATE_UINT32_V(engine_error, VamsPcieState, 6),
++        VMSTATE_UINT32_V(last_reset_reason, VamsPcieState, 6),
+         VMSTATE_END_OF_LIST()
+     },
+ };
+@@ -1262,6 +1368,10 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->command_deadline_ns = 0;
+     s->engine_finish_ns = 0;
+     s->engine_generation = 0;
++    s->engine_epoch = 0;
++    s->active_engine_epoch = 0;
++    s->engine_error = 0;
++    s->last_reset_reason = VAMS_RESET_REASON_POWER_ON;
+     s->engine_inflight = false;
+     vams_pcie_check_invariants(s);
+ }

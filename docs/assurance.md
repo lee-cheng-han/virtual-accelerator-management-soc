@@ -14,15 +14,15 @@ The implemented invariant set requires:
 - firmware-bridge ownership, stale-result draining, and engine ownership are
   mutually exclusive;
 - `DEVICE_STATUS.ENGINE_BUSY` is equivalent to engine ownership;
-- an active engine callback carries the current reset generation and positive
-  deadline/finish timestamps;
+- an active engine callback carries the current reset generation, current
+  private engine epoch, and positive deadline/finish timestamps;
 - reset cancellation clears engine ownership and BUSY before a new generation
   can accept work.
 
-These checks cover the command states that exist today. Exactly-once completion
-counters across a future multi-object firmware scheduler, buffer-mapping
-lifetime assertions, and engine-epoch checks will be added with those
-components.
+The firmware scheduler separately asserts every fixed-pool ownership transition
+and exactly-once terminal publication. Buffer-mapping lifetime and a
+firmware-to-engine running-result protocol remain outside the implemented
+invariant boundary.
 
 ## Descriptor fuzz regression
 

@@ -95,13 +95,31 @@ source preservation, destination guards, zero length, 64-bit range overflow,
 zero/misaligned addresses, overlap rejection, invalid CRC flags, and
 directional DMA failures.
 The same run, exposed as `async-engine-smoke`, advances QEMU virtual time
-explicitly to verify timeout-before-payload, observes BUSY before advancing the
+explicitly to verify a ten-millisecond timeout before payload access against a
+twenty-millisecond engine interval, observes BUSY before advancing the
 engine, resets the queue, advances beyond the cancelled expiry, rejects stale CQ
 and payload writes, then completes a clean post-reset NOP.
+The dual-QEMU integration also resets an active engine while another command is
+queued. It requires exactly one `RESET/RESET` result for the active command,
+unchanged payload, an advanced private engine epoch with unchanged host reset
+generation, no stale callback after the old timer fires, and successful queued
+work afterward.
 `descriptor-fuzz` executes 4,096 raw descriptors across 28 first-error
 categories and checks the exact completion contract. `bar-fuzz` executes 4,096
 mixed-width malformed accesses while periodically checking immutable identity,
 device invariants, and timer progress. Both print stable seeds and complete
 replay context on failure; `fuzz-smoke` runs them together and
 `assurance-smoke` adds ABI, source-hygiene, and queue-model checks.
+`payload-throughput-smoke` verifies a 16 MiB chunked copy using an independent
+CRC of the destination, then checks non-round cross-chunk fill and vector
+operations including guards and source preservation. It reports host-clock
+QEMU throughput without a physical-performance claim or release threshold.
+`dma-engine-smoke` combines that bounded-engine test with the dual-QEMU Zephyr
+payload integration.
+`scheduler-recovery-smoke` boots a test-only delayed Zephyr scheduler, forces a
+one-millisecond NOP to expire while queued, checks every asserted ownership
+transition and exactly one firmware publication, verifies the host CQ timeout,
+then requires a clean NOP and a second exactly-once trace.
+`firmware-scheduler-unit` compiles the production EDF comparator as strict host
+C and verifies deadline ordering plus FIFO acceptance-sequence tie-breaking.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
