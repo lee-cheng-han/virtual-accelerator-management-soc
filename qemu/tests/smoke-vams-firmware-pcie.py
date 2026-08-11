@@ -36,15 +36,21 @@ COMPLETION = struct.Struct("<IHHIIQQ")
 
 
 class QTest:
-    def __init__(self, executable, command_socket, stderr):
+    def __init__(self, executable, command_socket, stderr,
+                 device_options=None):
+        device = "vams-pcie,addr=2"
+        if command_socket is not None:
+            device += ",command-chardev=command"
+        if device_options:
+            device += f",{device_options}"
         command_options = (
             [
                 "-chardev",
                 f"socket,id=command,path={command_socket},server=off",
-                "-device", "vams-pcie,addr=2,command-chardev=command",
+                "-device", device,
             ]
             if command_socket is not None
-            else ["-device", "vams-pcie,addr=2"]
+            else ["-device", device]
         )
         self.process = subprocess.Popen(
             [

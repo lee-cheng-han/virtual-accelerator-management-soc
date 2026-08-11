@@ -7,8 +7,10 @@ must not advertise a feature until it works.
 The current QEMU PCIe model implements identification/device control, SQ/CQ,
 interrupt control, engine observation, and engine-only reset. It advertises
 capability bits 0, 1, 4, and 5: DMA, MSI-X, engine reset, and polling-safe CQ.
-Watchdog bridge, host telemetry snapshot, firmware-issued engine control, and
-debug blocks remain unimplemented and return illegal-MMIO behavior. See the
+With `x-vams-debug=true`, it additionally implements the debug fault block and
+advertises bit 6; production instances neither advertise nor expose it.
+Watchdog bridge, host telemetry snapshot, and firmware-issued engine control
+remain unimplemented and return illegal-MMIO behavior. See the
 [NOP command-path guide](nop-command-path.md),
 [MEM_COPY guide](mem-copy-command-path.md),
 [MEM_FILL guide](mem-fill-command-path.md),
@@ -199,12 +201,16 @@ reads all ones and writes are illegal MMIO. It is never a production capability.
 
 | Offset | Register | Reset | Access | Owner | Definition / side effects |
 |---:|---|---:|---|---|---|
-| `f00` | `VAMS_FAULT_CONTROL` | `00000000` | W1S | Test host | One-shot bits: 0 next DMA timeout, 1 drop next CQ interrupt, 2 hang next engine command, 3 hang firmware service, 4 corrupt next mailbox, 5 reset on next active transfer. Mutually exclusive; multiple bits rejected. Bit auto-clears when triggered. |
-| `f04` | `VAMS_FAULT_ARG` | `00000000` | RW | Test host | Fault-specific argument; write only when CONTROL zero. Zero selects deterministic default. |
+| `f00` | `VAMS_FAULT_CONTROL` | `00000000` | W1S | Test host | One-shot bits: 0 force next payload timeout, 1 drop next CQ notification, 2 hang next engine command, 3 fail a payload DMA read, 4 fail a payload DMA write, 5 queue-reset on next active transfer. Mutually exclusive; multiple bits rejected. Bit auto-clears when triggered. |
+| `f04` | `VAMS_FAULT_ARG` | `00000000` | RW | Test host | Matching-event ordinal. Zero selects the next match; N selects the Nth matching engine, CQ, or payload-DMA event. Write only when CONTROL zero. Device reset clears. |
 | `f08` | `VAMS_FAULT_STATUS` | `00000000` | W1C | HW | Bits mirror fault types that have triggered. Multiple defined bits may be cleared; zero no-op. Device reset preserves, Cold reset clears. |
 | `f0c` | `VAMS_FAULT_COUNT` | `00000000` | RO | HW | Saturating number of triggered injections; Cold reset clears. |
 | `f10` | `VAMS_DEBUG_LOCK` | `00000000` | W1S | Host | Write 1 permanently disables new faults and INTR_FORCE until Cold reset; reads bit 0. Zero no-op. |
+| `f14` | `VAMS_CHECKPOINT_CONTROL` | `00000000` | RW | Test host | Arm one named checkpoint: 1 engine active before execution, 2 payload complete before CQ publication. One checkpoint may be armed or paused. Device reset clears. |
+| `f18` | `VAMS_CHECKPOINT_STATUS` | `00000000` | RO | HW | Zero while running; otherwise the paused checkpoint enum. Queue, engine, or device reset cancels a pause. |
+| `f1c` | `VAMS_CHECKPOINT_RELEASE` | `00000000` | WO | Test host | Write 1 to release the currently paused checkpoint; other writes or release while not paused are BAD_CONFIG. Read zero. |
 
 Arming while another fault is armed is BAD_CONFIG. Fault effects and recovery
 are specified in `fault-recovery.md`; injection never bypasses descriptor range
-checks or grants access outside the PCI DMA address space.
+checks or grants access outside the PCI DMA address space. `DEBUG_LOCK` also
+cancels an armed but not-yet-hit checkpoint and is rejected while paused.

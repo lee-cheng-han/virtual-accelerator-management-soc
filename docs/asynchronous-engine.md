@@ -41,8 +41,8 @@ engine epoch.
 
 The engine timer, captured submission/completion, absolute deadline, finish
 time, generation, engine epoch/error state, reset reason, and in-flight bit are
-included in QEMU migration state version 6. Live migration remains unsupported
-until a dedicated end-to-end migration
+included with the debug fault/checkpoint state in QEMU migration state version
+7. Live migration remains unsupported until a dedicated end-to-end migration
 test exists, but serialized device state is not silently incomplete.
 
 ## Validation

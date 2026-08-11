@@ -26,36 +26,48 @@ their host generations and deadlines; otherwise recovery escalates.
 
 | Scenario / trigger | Expected behavior | Evidence and recovery |
 |---|---|---|
-| DMA timeout: arm fault bit 0, submit MEM_COPY | Next payload DMA never completes until firmware deadline; RUNNING→ABORTING. | timed-out counter + timeout completion; abort or engine reset; following NOP succeeds. |
+| DMA timeout: arm fault bit 0, submit MEM_COPY | Modeled finish is forced beyond its otherwise-successful deadline; payload is untouched. | `TIMED_OUT/TIMEOUT`, sticky evidence and count; following NOP succeeds. |
 | Dropped completion interrupt: bit 1 | Next CQ write/tail occurs but MSI-X transition is suppressed once. | CQ status stays pending; driver polling completes original cookie; no reset; fault count increments. |
 | Invalid descriptor version: submit version 2 | Validator rejects before payload DMA. | INVALID/UNSUPPORTED_VERSION, rejected counter; next valid command succeeds. Protocol trigger, no debug bit. |
 | SQ full: publish depth-1 descriptors while consumption paused by test harness | Additional nonblocking submit returns `-EAGAIN`; no overwrite/doorbell. | head/tail remain legal, high-water observed; draining restores progress. Protocol trigger. |
-| Reset during active transfer: bit 5, submit a payload command | Hardware starts selected-scope reset after DMA becomes active; old callback suppressed. | generation and reset reason change; request gets local reset error/no stale CQ; reinit + NOP succeeds. |
-| Engine hang: bit 2, submit any engine opcode | Engine remains BUSY until deadline; abort deliberately fails. | engine HUNG/error, timeout counter; engine reset; subsequent work remains correct. |
-| Firmware task hang: bit 3 with ARG selecting service | Selected task stops advancing its epoch. | heartbeat/task diagnostic stalls, watchdog reset count/reason increments; management reboot and host queue rebuild. |
-| Corrupt mailbox: bit 4 then send management message | Next message checksum/type is made invalid; command rings unaffected. | mailbox CORRUPT + FW error/log; message discarded; mailbox resynchronized or management reset if persistent. |
+| Engine hang: bit 2, submit any engine opcode | Engine remains BUSY/HUNG with no timer callback. | engine error evidence; engine-only reset returns RESET and subsequent work remains correct. |
+| Payload DMA read failure: bit 3 | Selected payload read returns a modeled directional failure before memory access. | FAILED/DMA_READ, destination unchanged, next NOP succeeds. |
+| Payload DMA write failure: bit 4 | Selected payload write returns a modeled directional failure before the write. | FAILED/DMA_WRITE, destination unchanged, next NOP succeeds. |
+| Reset during active transfer: bit 5, submit a payload command | Queue reset begins immediately after BUSY asserts; callback is cancelled. | generation/reason change, no old CQ or payload write, reconfigure + NOP succeeds. |
 
-Each row becomes a regression test in the phase that implements its trigger.
-Tests must arm, confirm armed state, perform exactly one triggering action,
+Every implemented row is a regression test. Tests must arm, confirm armed
+state, perform exactly one triggering action,
 observe `FAULT_STATUS/COUNT`, validate recovery, and execute a clean NOP. A test
 must fail if the fault does not trigger or triggers twice.
 
-The asynchronous-engine baseline now covers a natural ten-millisecond deadline
+The asynchronous-engine baseline covers a natural ten-millisecond deadline
 against a deterministic twenty-millisecond operation and queue reset after BUSY
 assertion. It proves timeout-before-payload, timer cancellation, generation
 suppression, and clean NOP recovery. Engine-only reset now provides a second
 recovery path: it completes active work as `RESET/RESET`, advances a private
 epoch without changing queue generation, preserves queued work, and rejects the
-cancelled callback after its original deadline. The debug fault bits, forced
-abort failure, counters, and named pause checkpoints in the table remain
-unimplemented.
+cancelled callback after its original deadline.
+
+The debug-gated QEMU endpoint now implements all six PCI-local one-shot faults
+above. `FAULT_ARG=N` selects the Nth matching event, with zero selecting the
+next; only the triggering match changes sticky status and the saturating count.
+The regression contrasts a suppressed CQ notification with a normal MSI-X PBA
+transition, recovers a hung engine, proves directional DMA failures preserve the
+destination, and reconfigures after forced queue reset. It executes a clean NOP
+after every fault. Evidence and the debug lock survive device reset, while cold
+reset clears both.
+
+Two explicit checkpoints pause after engine activation but before execution,
+and after payload completion but before CQ publication. Tests advance virtual
+time while paused to prove forbidden progress, then release and validate the
+original command. Firmware-task hang and mailbox-corruption injection remain
+future cross-subsystem extensions rather than falsely advertised PCI faults.
 
 The firmware scheduler additionally has a test-only dispatch delay that forces
 a legal one-millisecond command to expire while `QUEUED`. The regression
 requires `QUEUED -> ABORTING -> COMPLETED_ERROR`, exactly one timeout
 publication, and a clean following NOP. This is deterministic queued recovery;
-it does not replace the unimplemented running-command firmware abort protocol
-or debug-injected engine-hang fault above.
+it does not replace the unimplemented running-command firmware abort protocol.
 
 ## Escalation policy
 

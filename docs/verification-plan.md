@@ -104,6 +104,15 @@ queued. It requires exactly one `RESET/RESET` result for the active command,
 unchanged payload, an advanced private engine epoch with unchanged host reset
 generation, no stale callback after the old timer fires, and successful queued
 work afterward.
+`fault-injection-smoke` proves the debug property is required, rejects an
+ambiguous multi-bit arm, and injects forced timeout, dropped CQ notification,
+engine hang, payload DMA read/write failure, and queue reset after BUSY. It
+checks sticky status and the saturating trigger count, selects the second DMA
+read through `FAULT_ARG`, contrasts dropped and normal MSI-X PBA behavior,
+requires the specified recovery and a clean NOP after every trigger, and proves
+debug evidence/lock persistence across device reset. Engine-start and
+pre-CQ-publication checkpoints additionally prove no forbidden progress while
+virtual time advances, followed by correct release.
 `descriptor-fuzz` executes 4,096 raw descriptors across 28 first-error
 categories and checks the exact completion contract. `bar-fuzz` executes 4,096
 mixed-width malformed accesses while periodically checking immutable identity,

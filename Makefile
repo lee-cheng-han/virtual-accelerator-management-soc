@@ -49,6 +49,7 @@ VAMS_FUZZ_ITERATIONS ?= 4096
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
+	fault-injection-smoke \
 	payload-throughput-smoke \
 	dma-engine-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
@@ -93,6 +94,8 @@ help:
 	  '                   Verify deadlines and reset-safe engine cancellation' \
 	  '  make scheduler-recovery-smoke' \
 	  '                   Verify firmware queued timeout and clean recovery' \
+	  '  make fault-injection-smoke' \
+	  '                   Verify debug faults, checkpoints, and recovery' \
 	  '  make payload-throughput-smoke' \
 	  '                   Verify bounded DMA and report virtual throughput' \
 	  '  make dma-engine-smoke' \
@@ -128,7 +131,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Scheduling and recovery complete' README.md; \
+	grep -q 'Deterministic fault injection complete' README.md; \
 	grep -q 'bounded 64 KiB DMA working chunk' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
@@ -273,6 +276,10 @@ scheduler-recovery-smoke: zephyr-scheduler-timeout
 	VAMS_SCHEDULER_FIRMWARE="$(VAMS_SCHEDULER_FIRMWARE)" \
 	./qemu/tests/smoke-vams-scheduler-recovery.py
 
+fault-injection-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/fault/vams-fault-injection.py
+
 payload-throughput-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/performance/vams-payload-throughput.py
@@ -308,6 +315,7 @@ fuzz-smoke: descriptor-fuzz bar-fuzz
 source-check:
 	python3 -m py_compile scripts/*.py tests/abi/*.py \
 		qemu/tests/*.py qemu/tests/qtest/*.py qemu/tests/fuzz/*.py \
+		qemu/tests/fault/*.py \
 		qemu/tests/performance/*.py
 	@set -eu; \
 	for script in scripts/*.sh qemu/tests/*.sh kernel/tests/*.sh; do \
@@ -315,7 +323,8 @@ source-check:
 	done
 	git diff --check
 
-assurance-smoke: check source-check queue-model-smoke fuzz-smoke
+assurance-smoke: check source-check queue-model-smoke fuzz-smoke \
+	fault-injection-smoke
 
 kernel:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)"
@@ -400,6 +409,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0013-hw-misc-bound-vams-payload-dma-working-sets.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0015-hw-misc-add-vams-deterministic-fault-controls.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

@@ -6,7 +6,7 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Scheduling and recovery complete.**
+> Status: **Deterministic fault injection complete.**
 > The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
@@ -26,6 +26,9 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > earliest-deadline scheduler, and exactly-once completion tasks.
 > Engine-only reset now terminates active work with a reset completion, advances
 > a private engine epoch, preserves queued work, and suppresses stale callbacks.
+> A property-gated debug block now injects six one-shot PCI faults, selects an
+> Nth matching transaction, pauses two named race windows, preserves evidence,
+> locks until cold reset, and requires a clean command after every recovery.
 
 ## Architecture
 
@@ -89,6 +92,8 @@ internal management peripheral, not the host datapath.
   queued deadlines, reset generations, and exactly-once publication
 - Host-visible engine status/error/epoch state and engine-only reset with a
   terminal reset result, queued-work preservation, and stale-callback rejection
+- Six debug-gated timeout/IRQ/hang/DMA/reset faults with Nth-match selection,
+  engine-start and CQ-publication checkpoints, persistent evidence, and lockout
 - Fail-fast queue/bridge/engine invariants plus replayable raw-descriptor and
   malformed-BAR mutation regressions
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
@@ -169,6 +174,8 @@ make vector-add-smoke \
 make async-engine-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
   QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make fault-injection-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make dma-engine-smoke \
   CROSS_COMPILE=riscv64-unknown-elf- \
@@ -254,6 +261,9 @@ scaffolding and gain tracked files only when their components are built.
   payload engine does not yet return running-command events to firmware, so
   firmware-side abort acknowledgment and DMA-result telemetry remain
   unimplemented. QEMU independently provides engine-only recovery.
+- Fault injection currently targets the PCI queue, engine, DMA, and interrupt
+  model. Firmware-task hang and mailbox-corruption injection remain planned
+  cross-subsystem extensions.
 - The public host API currently exposes device information and synchronous NOP;
   payload mapping and asynchronous userspace submission remain future work.
 - The provisional development PCI ID is not allocated for production use.

@@ -1,0 +1,521 @@
+Subject: [PATCH] hw/misc: add VAMS deterministic fault controls
+
+Add a property-gated fault block with six one-shot injections, Nth-match
+selection, persistent evidence, a cold-reset-only lock, and engine/CQ
+pause-release checkpoints. Production instances retain their original
+capabilities and reject every debug-block access.
+
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -74,6 +74,14 @@ enum {
+     VAMS_REG_RESET_REQUEST = 0x60c,
+     VAMS_REG_LAST_RESET_REASON = 0x610,
+     VAMS_REG_RESET_STATUS = 0x614,
++    VAMS_REG_FAULT_CONTROL = 0xf00,
++    VAMS_REG_FAULT_ARG = 0xf04,
++    VAMS_REG_FAULT_STATUS = 0xf08,
++    VAMS_REG_FAULT_COUNT = 0xf0c,
++    VAMS_REG_DEBUG_LOCK = 0xf10,
++    VAMS_REG_CHECKPOINT_CONTROL = 0xf14,
++    VAMS_REG_CHECKPOINT_STATUS = 0xf18,
++    VAMS_REG_CHECKPOINT_RELEASE = 0xf1c,
+ };
+ 
+ enum {
+@@ -81,6 +89,7 @@ enum {
+     VAMS_CAP_MSIX = BIT(1),
+     VAMS_CAP_ENGINE_RESET = BIT(4),
+     VAMS_CAP_POLLING_CQ = BIT(5),
++    VAMS_CAP_DEBUG_FAULT = BIT(6),
+     VAMS_STATUS_READY = BIT(0),
+     VAMS_STATUS_QUEUES_READY = BIT(2),
+     VAMS_STATUS_ENGINE_BUSY = BIT(3),
+@@ -105,15 +114,26 @@ enum {
+     VAMS_QUEUE_STATUS_EMPTY = BIT(1),
+     VAMS_QUEUE_STATUS_FULL = BIT(2),
+     VAMS_ENGINE_STATUS_BUSY = BIT(0),
++    VAMS_ENGINE_STATUS_HUNG = BIT(2),
+     VAMS_ENGINE_STATUS_ERROR = BIT(3),
+     VAMS_ENGINE_ERROR_DMA_READ = BIT(0),
+     VAMS_ENGINE_ERROR_DMA_WRITE = BIT(1),
+     VAMS_ENGINE_ERROR_TIMEOUT = BIT(2),
++    VAMS_ENGINE_ERROR_ABORT_FAILED = BIT(3),
+     VAMS_RESET_REQUEST_ENGINE = BIT(1),
+     VAMS_RESET_REASON_POWER_ON = 0,
+     VAMS_RESET_REASON_DEVICE = 1,
+     VAMS_RESET_REASON_QUEUE = 2,
+     VAMS_RESET_REASON_ENGINE = 3,
++    VAMS_FAULT_DMA_TIMEOUT = BIT(0),
++    VAMS_FAULT_DROP_CQ_INTERRUPT = BIT(1),
++    VAMS_FAULT_ENGINE_HANG = BIT(2),
++    VAMS_FAULT_DMA_READ = BIT(3),
++    VAMS_FAULT_DMA_WRITE = BIT(4),
++    VAMS_FAULT_RESET_ACTIVE = BIT(5),
++    VAMS_CHECKPOINT_NONE = 0,
++    VAMS_CHECKPOINT_ENGINE_START = 1,
++    VAMS_CHECKPOINT_CQ_PUBLISH = 2,
+ };
+ 
+ #define VAMS_CONTROL_DEFINED \
+@@ -121,6 +141,7 @@ enum {
+ #define VAMS_ERROR_DEFINED 0x000003ff
+ #define VAMS_INTR_DEFINED 0x0000000f
+ #define VAMS_QUEUE_CONTROL_DEFINED (VAMS_QUEUE_ENABLE | VAMS_QUEUE_RESET)
++#define VAMS_FAULT_DEFINED 0x0000003f
+ #define VAMS_QUEUE_MIN_DEPTH 16
+ #define VAMS_QUEUE_MAX_DEPTH 1024
+ 
+@@ -169,8 +190,45 @@ struct VamsPcieState {
+     uint32_t engine_error;
+     uint32_t last_reset_reason;
+     bool engine_inflight;
++    bool engine_hung;
++    bool x_vams_debug;
++    bool debug_lock;
++    uint32_t fault_control;
++    uint32_t fault_arg;
++    uint32_t fault_remaining;
++    uint32_t fault_status;
++    uint32_t fault_count;
++    uint32_t checkpoint_control;
++    uint32_t checkpoint_status;
+ };
+ 
++static bool vams_pcie_fault_trigger(VamsPcieState *s, uint32_t fault)
++{
++    if (s->fault_control != fault) {
++        return false;
++    }
++    g_assert(s->fault_remaining > 0);
++    if (--s->fault_remaining) {
++        return false;
++    }
++    s->fault_control = 0;
++    s->fault_status |= fault;
++    if (s->fault_count != UINT32_MAX) {
++        s->fault_count++;
++    }
++    return true;
++}
++
++static bool vams_pcie_checkpoint_hit(VamsPcieState *s, uint32_t checkpoint)
++{
++    if (s->checkpoint_control != checkpoint) {
++        return false;
++    }
++    s->checkpoint_control = VAMS_CHECKPOINT_NONE;
++    s->checkpoint_status = checkpoint;
++    return true;
++}
++
+ static void vams_pcie_check_invariants(const VamsPcieState *s)
+ {
+     if (s->sq_depth) {
+@@ -198,6 +256,13 @@ static void vams_pcie_check_invariants(const VamsPcieState *s)
+         g_assert(s->command_deadline_ns > 0);
+         g_assert(s->engine_finish_ns > 0);
+     }
++    g_assert(!s->engine_hung || s->engine_inflight);
++    g_assert(!s->fault_control || is_power_of_2(s->fault_control));
++    g_assert(!(s->fault_control & ~VAMS_FAULT_DEFINED));
++    g_assert(!!s->fault_control == !!s->fault_remaining);
++    g_assert(s->checkpoint_control <= VAMS_CHECKPOINT_CQ_PUBLISH);
++    g_assert(s->checkpoint_status <= VAMS_CHECKPOINT_CQ_PUBLISH);
++    g_assert(!s->checkpoint_control || !s->checkpoint_status);
+ }
+ 
+ static void vams_pcie_notify(VamsPcieState *s, uint32_t pending)
+@@ -219,6 +284,10 @@ static void vams_pcie_raise_interrupt(VamsPcieState *s, uint32_t sources)
+     uint32_t newly_pending = sources & ~s->intr_status;
+ 
+     s->intr_status |= sources;
++    if ((newly_pending & VAMS_INTR_CQ) &&
++        vams_pcie_fault_trigger(s, VAMS_FAULT_DROP_CQ_INTERRUPT)) {
++        newly_pending &= ~VAMS_INTR_CQ;
++    }
+     vams_pcie_notify(s, newly_pending);
+ }
+ 
+@@ -301,6 +370,8 @@ static void vams_pcie_cancel_engine(VamsPcieState *s)
+ {
+     timer_del(s->engine_timer);
+     s->engine_inflight = false;
++    s->engine_hung = false;
++    s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     vams_pcie_check_invariants(s);
+ }
+@@ -528,6 +599,10 @@ static void vams_pcie_execute_payload(
+         return;
+     }
+     if (submission->opcode == VAMS_OP_MEM_FILL) {
++        if (vams_pcie_fault_trigger(s, VAMS_FAULT_DMA_READ)) {
++            dma_error = VAMS_ERR_DMA_READ;
++            goto out;
++        }
+         result = pci_dma_read(pdev, le64_to_cpu(submission->source_dma),
+                               &fill_value, sizeof(fill_value));
+         if (result != MEMTX_OK) {
+@@ -548,6 +623,10 @@ static void vams_pcie_execute_payload(
+         if (submission->opcode == VAMS_OP_MEM_FILL) {
+             memset(buffer, fill_value, chunk_size);
+         } else {
++            if (vams_pcie_fault_trigger(s, VAMS_FAULT_DMA_READ)) {
++                dma_error = VAMS_ERR_DMA_READ;
++                goto out;
++            }
+             result = pci_dma_read(
+                 pdev, le64_to_cpu(submission->source_dma) + offset,
+                 buffer, chunk_size);
+@@ -564,6 +643,10 @@ static void vams_pcie_execute_payload(
+         if (submission->opcode == VAMS_OP_VECTOR_ADD) {
+             uint32_t index;
+ 
++            if (vams_pcie_fault_trigger(s, VAMS_FAULT_DMA_READ)) {
++                dma_error = VAMS_ERR_DMA_READ;
++                goto out;
++            }
+             result = pci_dma_read(
+                 pdev, le64_to_cpu(submission->destination_dma) + offset,
+                 destination_buffer, chunk_size);
+@@ -580,6 +663,10 @@ static void vams_pcie_execute_payload(
+                          source_value + destination_value);
+             }
+         }
++        if (vams_pcie_fault_trigger(s, VAMS_FAULT_DMA_WRITE)) {
++            dma_error = VAMS_ERR_DMA_WRITE;
++            goto out;
++        }
+         result = pci_dma_write(
+             pdev, le64_to_cpu(submission->destination_dma) + offset,
+             submission->opcode == VAMS_OP_VECTOR_ADD ?
+@@ -640,6 +727,7 @@ static void vams_pcie_engine_complete(void *opaque)
+     vams_pcie_check_invariants(s);
+     g_assert(s->engine_inflight);
+     s->engine_inflight = false;
++    s->engine_hung = false;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     vams_pcie_check_invariants(s);
+ 
+@@ -670,6 +758,10 @@ static void vams_pcie_engine_complete(void *opaque)
+         s->active_engine_epoch != s->engine_epoch) {
+         return;
+     }
++    if (vams_pcie_checkpoint_hit(s, VAMS_CHECKPOINT_CQ_PUBLISH)) {
++        vams_pcie_check_invariants(s);
++        return;
++    }
+     if (!vams_pcie_publish_completion(s, completion)) {
+         return;
+     }
+@@ -680,18 +772,31 @@ static void vams_pcie_schedule_engine(VamsPcieState *s)
+ {
+     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     int64_t expiry;
++    bool force_timeout;
+ 
+     g_assert(!s->engine_inflight);
+     g_assert(vams_pcie_is_payload_opcode(s->bridge_submission.command.opcode));
+ 
+-    s->engine_finish_ns = now + VAMS_ENGINE_EXECUTION_NS;
++    force_timeout = vams_pcie_fault_trigger(s, VAMS_FAULT_DMA_TIMEOUT);
++    s->engine_finish_ns = force_timeout ? s->command_deadline_ns + 1 :
++                          now + VAMS_ENGINE_EXECUTION_NS;
+     s->engine_generation = s->reset_generation;
+     s->active_engine_epoch = s->engine_epoch;
+     s->engine_inflight = true;
++    s->engine_hung = vams_pcie_fault_trigger(s, VAMS_FAULT_ENGINE_HANG);
++    if (s->engine_hung) {
++        s->engine_error |= VAMS_ENGINE_ERROR_ABORT_FAILED;
++    }
+     s->device_status |= VAMS_STATUS_ENGINE_BUSY;
+-    expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
+-    timer_mod_ns(s->engine_timer, MAX(expiry, now));
++    if (!s->engine_hung &&
++        !vams_pcie_checkpoint_hit(s, VAMS_CHECKPOINT_ENGINE_START)) {
++        expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
++        timer_mod_ns(s->engine_timer, MAX(expiry, now));
++    }
+     vams_pcie_check_invariants(s);
++    if (vams_pcie_fault_trigger(s, VAMS_FAULT_RESET_ACTIVE)) {
++        vams_pcie_queue_reset(s);
++    }
+ }
+ 
+ static void vams_pcie_engine_reset(VamsPcieState *s)
+@@ -702,6 +807,8 @@ static void vams_pcie_engine_reset(VamsPcieState *s)
+ 
+     timer_del(s->engine_timer);
+     s->engine_inflight = false;
++    s->engine_hung = false;
++    s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     s->engine_epoch++;
+     s->engine_error = 0;
+@@ -721,6 +828,36 @@ static void vams_pcie_engine_reset(VamsPcieState *s)
+     vams_pcie_process_sq(s);
+ }
+ 
++static void vams_pcie_checkpoint_release(VamsPcieState *s)
++{
++    struct vams_completion *completion =
++        (struct vams_completion *)s->bridge_completion;
++    uint32_t checkpoint = s->checkpoint_status;
++
++    g_assert(checkpoint != VAMS_CHECKPOINT_NONE);
++    s->checkpoint_status = VAMS_CHECKPOINT_NONE;
++    if (checkpoint == VAMS_CHECKPOINT_ENGINE_START) {
++        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++        int64_t expiry;
++
++        g_assert(s->engine_inflight);
++        g_assert(!s->engine_hung);
++        expiry = MIN(s->command_deadline_ns, s->engine_finish_ns);
++        timer_mod_ns(s->engine_timer, MAX(expiry, now));
++    } else {
++        g_assert(checkpoint == VAMS_CHECKPOINT_CQ_PUBLISH);
++        if (s->engine_generation != s->reset_generation ||
++            s->active_engine_epoch != s->engine_epoch) {
++            return;
++        }
++        if (!vams_pcie_publish_completion(s, completion)) {
++            return;
++        }
++        vams_pcie_process_sq(s);
++    }
++    vams_pcie_check_invariants(s);
++}
++
+ static int vams_pcie_bridge_can_receive(void *opaque)
+ {
+     VamsPcieState *s = opaque;
+@@ -789,6 +926,9 @@ static void vams_pcie_process_sq(VamsPcieState *s)
+         !(pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MASTER)) {
+         return;
+     }
++    if (s->checkpoint_status != VAMS_CHECKPOINT_NONE) {
++        return;
++    }
+ 
+     while (s->sq_head != s->sq_tail && !vams_pcie_cq_full(s) &&
+            !s->bridge_inflight && !s->bridge_discard_completion &&
+@@ -877,6 +1017,12 @@ static void vams_pcie_device_reset(VamsPcieState *s)
+     vams_pcie_cancel_engine(s);
+     s->engine_epoch++;
+     s->engine_error = 0;
++    s->engine_hung = false;
++    s->fault_control = 0;
++    s->fault_arg = 0;
++    s->fault_remaining = 0;
++    s->checkpoint_control = VAMS_CHECKPOINT_NONE;
++    s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     s->last_reset_reason = VAMS_RESET_REASON_DEVICE;
+     s->device_control = 0;
+     s->device_status = VAMS_STATUS_RESETTING;
+@@ -917,6 +1063,10 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         return UINT64_MAX;
+     }
++    if (offset >= VAMS_REG_FAULT_CONTROL && !s->x_vams_debug) {
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        return UINT32_MAX;
++    }
+ 
+     switch (offset) {
+     case VAMS_REG_DEVICE_ID:
+@@ -929,7 +1079,8 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         return 1;
+     case VAMS_REG_CAPABILITIES:
+         return VAMS_CAP_DMA | VAMS_CAP_MSIX | VAMS_CAP_ENGINE_RESET |
+-               VAMS_CAP_POLLING_CQ;
++               VAMS_CAP_POLLING_CQ |
++               (s->x_vams_debug ? VAMS_CAP_DEBUG_FAULT : 0);
+     case VAMS_REG_MAX_TRANSFER:
+         return 0x01000000;
+     case VAMS_REG_QUEUE_LIMITS:
+@@ -987,6 +1138,7 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         return s->intr_coalesce;
+     case VAMS_REG_ENGINE_STATUS:
+         return (s->engine_inflight ? VAMS_ENGINE_STATUS_BUSY : 0) |
++               (s->engine_hung ? VAMS_ENGINE_STATUS_HUNG : 0) |
+                (s->engine_error ? VAMS_ENGINE_STATUS_ERROR : 0);
+     case VAMS_REG_ENGINE_CONTROL:
+         return 0;
+@@ -1003,6 +1155,22 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         return s->last_reset_reason;
+     case VAMS_REG_RESET_STATUS:
+         return 0;
++    case VAMS_REG_FAULT_CONTROL:
++        return s->fault_control;
++    case VAMS_REG_FAULT_ARG:
++        return s->fault_arg;
++    case VAMS_REG_FAULT_STATUS:
++        return s->fault_status;
++    case VAMS_REG_FAULT_COUNT:
++        return s->fault_count;
++    case VAMS_REG_DEBUG_LOCK:
++        return s->debug_lock;
++    case VAMS_REG_CHECKPOINT_CONTROL:
++        return s->checkpoint_control;
++    case VAMS_REG_CHECKPOINT_STATUS:
++        return s->checkpoint_status;
++    case VAMS_REG_CHECKPOINT_RELEASE:
++        return 0;
+     default:
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -1028,6 +1196,10 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         return;
+     }
++    if (offset >= VAMS_REG_FAULT_CONTROL && !s->x_vams_debug) {
++        vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
++        return;
++    }
+ 
+     if (offset >= VAMS_REG_SQ_BASE_LO && offset <= VAMS_REG_CQ_STATUS &&
+         (s->device_status & VAMS_STATUS_RESETTING)) {
+@@ -1059,6 +1231,8 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+     case VAMS_REG_ENGINE_EPOCH:
+     case VAMS_REG_LAST_RESET_REASON:
+     case VAMS_REG_RESET_STATUS:
++    case VAMS_REG_FAULT_COUNT:
++    case VAMS_REG_CHECKPOINT_STATUS:
+         vams_pcie_write_ro(s);
+         return;
+     case VAMS_REG_DEVICE_CONTROL:
+@@ -1240,6 +1414,10 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+         return;
+     }
+     case VAMS_REG_INTR_FORCE:
++        if (s->debug_lock) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
+         reserved = value32 & ~VAMS_INTR_DEFINED;
+         if (reserved) {
+             vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
+@@ -1260,6 +1438,72 @@ static void vams_pcie_bar0_write(void *opaque, hwaddr offset, uint64_t value,
+         }
+         vams_pcie_engine_reset(s);
+         return;
++    case VAMS_REG_FAULT_CONTROL:
++        reserved = value32 & ~VAMS_FAULT_DEFINED;
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        value32 &= VAMS_FAULT_DEFINED;
++        if (!value32) {
++            return;
++        }
++        if (s->debug_lock || s->fault_control || !is_power_of_2(value32)) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->fault_control = value32;
++        s->fault_remaining = s->fault_arg ? s->fault_arg : 1;
++        vams_pcie_check_invariants(s);
++        return;
++    case VAMS_REG_FAULT_ARG:
++        if (s->debug_lock || s->fault_control) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->fault_arg = value32;
++        return;
++    case VAMS_REG_FAULT_STATUS:
++        reserved = value32 & ~VAMS_FAULT_DEFINED;
++        s->fault_status &= ~(value32 & VAMS_FAULT_DEFINED);
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        return;
++    case VAMS_REG_DEBUG_LOCK:
++        reserved = value32 & ~BIT(0);
++        if (reserved) {
++            vams_pcie_set_error(s, VAMS_ERROR_RESERVED_WRITE);
++        }
++        if ((value32 & BIT(0)) &&
++            s->checkpoint_status != VAMS_CHECKPOINT_NONE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        if (value32 & BIT(0)) {
++            s->debug_lock = true;
++            s->fault_control = 0;
++            s->fault_remaining = 0;
++            s->checkpoint_control = VAMS_CHECKPOINT_NONE;
++        }
++        return;
++    case VAMS_REG_CHECKPOINT_CONTROL:
++        if (s->debug_lock || s->checkpoint_control || s->checkpoint_status ||
++            value32 < VAMS_CHECKPOINT_ENGINE_START ||
++            value32 > VAMS_CHECKPOINT_CQ_PUBLISH) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->checkpoint_control = value32;
++        vams_pcie_check_invariants(s);
++        return;
++    case VAMS_REG_CHECKPOINT_RELEASE:
++        if (value32 != 1 ||
++            s->checkpoint_status == VAMS_CHECKPOINT_NONE) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        vams_pcie_checkpoint_release(s);
++        return;
+     default:
+         vams_pcie_set_error(s, VAMS_ERROR_ILLEGAL_MMIO);
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -1286,7 +1530,7 @@ static const MemoryRegionOps vams_pcie_bar0_ops = {
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 6,
++    .version_id = 7,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+@@ -1329,6 +1573,15 @@ static const VMStateDescription vams_pcie_vmstate = {
+         VMSTATE_UINT32_V(active_engine_epoch, VamsPcieState, 6),
+         VMSTATE_UINT32_V(engine_error, VamsPcieState, 6),
+         VMSTATE_UINT32_V(last_reset_reason, VamsPcieState, 6),
++        VMSTATE_BOOL_V(engine_hung, VamsPcieState, 7),
++        VMSTATE_BOOL_V(debug_lock, VamsPcieState, 7),
++        VMSTATE_UINT32_V(fault_control, VamsPcieState, 7),
++        VMSTATE_UINT32_V(fault_arg, VamsPcieState, 7),
++        VMSTATE_UINT32_V(fault_remaining, VamsPcieState, 7),
++        VMSTATE_UINT32_V(fault_status, VamsPcieState, 7),
++        VMSTATE_UINT32_V(fault_count, VamsPcieState, 7),
++        VMSTATE_UINT32_V(checkpoint_control, VamsPcieState, 7),
++        VMSTATE_UINT32_V(checkpoint_status, VamsPcieState, 7),
+         VMSTATE_END_OF_LIST()
+     },
+ };
+@@ -1373,6 +1626,15 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->engine_error = 0;
+     s->last_reset_reason = VAMS_RESET_REASON_POWER_ON;
+     s->engine_inflight = false;
++    s->engine_hung = false;
++    s->debug_lock = false;
++    s->fault_control = 0;
++    s->fault_arg = 0;
++    s->fault_remaining = 0;
++    s->fault_status = 0;
++    s->fault_count = 0;
++    s->checkpoint_control = VAMS_CHECKPOINT_NONE;
++    s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     vams_pcie_check_invariants(s);
+ }
+ 
+@@ -1448,6 +1710,7 @@ static void vams_pcie_finalize(Object *obj)
+ 
+ static const Property vams_pcie_properties[] = {
+     DEFINE_PROP_CHR("command-chardev", VamsPcieState, command_chr),
++    DEFINE_PROP_BOOL("x-vams-debug", VamsPcieState, x_vams_debug, false),
+ };
+ 
+ static void vams_pcie_class_init(ObjectClass *klass, const void *data)

@@ -10,6 +10,12 @@ deadline completion, bounded payload DMA, reset-safe callback cancellation, and
 engine-only recovery. Host payload UAPI and firmware-issued abort control remain
 unavailable.
 
+The optional `x-vams-debug=true` property exposes deterministic fault and
+checkpoint registers for QTest only. Without it, capabilities remain
+`0x00000033`, the block reads as unimplemented, and accesses set illegal-MMIO.
+Debug-enabled test instances advertise `0x00000073`; this is not a production
+feature contract.
+
 | PCI field | Value |
 |---|---:|
 | Vendor ID | `0x1b36` |
@@ -53,6 +59,8 @@ The following registers implement the behavior defined by the
 | `0x60c` | `VAMS_RESET_REQUEST` | Engine-only reset request implemented |
 | `0x610` | `VAMS_LAST_RESET_REASON` | Power-on/device/queue/engine reason |
 | `0x614` | `VAMS_RESET_STATUS` | Zero for synchronous engine reset |
+| `0xf00–0xf10` | Fault controls/evidence/lock | Present only with `x-vams-debug=true` |
+| `0xf14–0xf1c` | Named checkpoint controls | Engine-start and pre-CQ pause/release |
 
 The SQ block at `0x100–0x11f` and CQ block at `0x200–0x21f` implement the
 normative base, depth, index, doorbell, control, and status registers. BAR0
@@ -85,6 +93,11 @@ active engine command/timer/deadline/generation are migration state. Live
 migration is not an accepted platform feature until an end-to-end migration
 regression exists.
 
+Migration state version 7 includes armed/triggered fault state, the saturating
+count, debug lock, engine-hung state, and checkpoint state. A destination still
+must be launched with a compatible debug property; live migration remains
+outside the accepted feature set.
+
 Writing the engine bit in `RESET_REQUEST` synchronously cancels active work,
 publishes `RESET/RESET`, increments the private engine epoch, records
 host-engine as the reset reason, and preserves the queue generation and pending
@@ -96,6 +109,8 @@ Build QEMU with `x86_64-softmmu`, then run:
 
 ```sh
 make pcie-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make fault-injection-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
@@ -109,6 +124,12 @@ The QTest smoke uses a Q35 PCIe root bus and verifies:
 - rejection of ENABLE before valid queues and bus mastering are configured; and
 - asynchronous RESETTING → READY behavior, generation increment, and
   RESET_DONE publication.
+
+The fault regression separately verifies production gating, rejected
+multi-fault arms, six one-shot triggers, Nth-match selection, MSI-X suppression
+against a normal PBA transition, timeout/hang/DMA/reset recovery, two paused
+race windows, persistent evidence, lockout, and a clean command after each
+fault.
 
 The Linux `vams_pci` driver now validates this contract, installs both MSI-X
 handlers, and is exercised by a disposable-guest probe/failure/remove test. See

@@ -1,26 +1,34 @@
 # Demo contract
 
-## Current Phase 0 demo
+## Current component demonstrations
 
-There is no executable accelerator yet. The honest Phase 0 demonstration is:
+The complete Linux-guest orchestration is not implemented yet, but the
+accelerator, real Zephyr control plane, DMA operations, recovery, and fault
+controls have executable hardware-free demonstrations:
 
 ```sh
 make check
-make tree
-make demo
+make firmware-pcie-smoke \
+  CROSS_COMPILE=/path/to/riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make fault-injection-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
-The first command must report `Phase 0 documentation checks: PASS`; the second
-shows the scaffold; the third explains that the full demo arrives in Phase 10.
-No boot, PCI, firmware, driver, or performance claim is made.
+These commands validate documentation/ABI/source hygiene, carry PCI descriptors
+through real firmware, verify all payload operations and reset recovery, then
+exercise six debug-only faults and two race checkpoints. They do not yet claim
+the final guest-driver/userspace workflow or physical performance.
 
 ## Incremental demonstrations
 
-Each phase adds one observable proof: Phase 1 prints the three-line RV32 boot
+Each phase adds one observable proof: Phase 1 prints the RV32 boot
 banner; Phase 2 boots Zephyr and task heartbeat; Phase 3 exercises mailbox and
 watchdog; Phase 4 enumerates/probes and raises a test MSI-X; Phase 5 round-trips
 NOP ID/cookie; Phase 6 verifies data operations; Phase 7 recovers a timeout;
-Phase 8 demonstrates deterministic faults; Phase 9 emits a reproducible report.
+Phase 8 demonstrates deterministic faults; all demonstrations through Phase 8
+are implemented. Phase 9 will add the reproducible qualification report.
 
 ## Final `make demo` acceptance
 
@@ -48,4 +56,3 @@ fault: <name> triggered; recovery generation <old> -> <new>
 post-recovery NOP: PASS
 VAMS DEMO: PASS
 ```
-

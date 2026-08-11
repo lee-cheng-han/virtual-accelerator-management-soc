@@ -18,6 +18,8 @@ The implemented invariant set requires:
   private engine epoch, and positive deadline/finish timestamps;
 - reset cancellation clears engine ownership and BUSY before a new generation
   can accept work.
+- at most one one-shot fault and one named checkpoint are armed, paused work
+  cannot be dispatched around, and HUNG always implies active engine ownership.
 
 The firmware scheduler separately asserts every fixed-pool ownership transition
 and exactly-once terminal publication. Buffer-mapping lifetime and a
@@ -82,3 +84,9 @@ make fuzz-smoke QEMU_SYSTEM_X86_64=/path/to/sanitized/qemu-system-x86_64
 `make source-check` compiles every Python test/helper, syntax-checks repository
 shell tests, and rejects whitespace errors. `make check` retains generated ABI,
 raw little-endian layout, and warning-clean GCC/Clang compile checks.
+
+`fault-injection-smoke` runs only against an explicitly debug-enabled endpoint.
+It verifies that the same registers are inaccessible on a production instance,
+then exercises all six faults, the Nth matching DMA read, both named
+pause/release checkpoints, evidence persistence, debug lockout, and successful
+post-recovery commands.
