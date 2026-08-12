@@ -1,52 +1,74 @@
-# Performance measurement plan
+# Stress and performance qualification
 
-Phase 0 contains no performance results. QEMU timing is useful for regressions
-and control-plane analysis, not a prediction of physical silicon throughput.
+VAMS performance evidence is produced entirely by its virtual platform. Host
+timing is useful for regression detection and control-plane analysis, but is
+not a prediction of physical silicon throughput. A correctness failure always
+invalidates the timing results from that run.
 
-The implemented `payload-throughput-smoke` reports host-clock throughput for
-one integrity-checked 16 MiB MEM_COPY. It is an early regression observation,
-not the statistically controlled benchmark described below, and currently has
-no numerical acceptance threshold.
+## Automated qualification
 
-## Metrics
+`make stress-qualification` combines four reproducible checks:
 
-- Command latency from host tail publication to CQ observation, reported as
-  count, min, median, p90, p99, p99.9, max, mean, and standard deviation.
-- Firmware latency from descriptor acceptance to CQ publication, correlated by
-  command ID and device timestamp.
-- Steady-state payload throughput and commands/s for each implemented opcode.
-- Host CPU time, QEMU process CPU time, completion interrupts/command, polling
-  wakeups, queue occupancy/high-water, timeout/error rate, and DMA bytes.
-- Firmware task stack high-water, scheduler queue delay, engine busy fraction,
-  and recovery duration by scope.
+- the independent SQ/CQ property model exercises wrap, backpressure, malformed
+  doorbells, interrupt state, queue enable transitions, and reset;
+- the bounded-DMA test verifies a 16 MiB copy and independent CRC plus
+  cross-chunk fill/vector integrity, then reports host-clock throughput;
+- the Zephyr boot test captures static SRAM use, every firmware-task stack
+  high-water mark, fixed-pool and pipeline-queue occupancy, and the worst
+  observed watchdog pet interval and margin;
+- the stress runner completes one million commands, including all four payload
+  opcodes, at queue occupancy 15/16, performs 1,000 deterministic queue resets,
+  advances 24 hours of virtual time, and proves post-endurance liveness.
 
-## Method
+The stress runner checks every command ID, status, error, byte count, CRC where
+applicable, and user cookie. It rejects missing, reordered, stale, duplicate,
+or corrupt completions. Payload results are independently checked. Its JSON
+reports are written to `build/reports/stress-qualification.json` and
+`build/reports/firmware-resources.json`; they record counts, resets, wrap and
+queue high-water, opcode mix, firmware resource margins, failures,
+commands/s, and host-clock latency distributions (minimum, mean, standard
+deviation, p50, p90, p99, p99.9, and maximum).
 
-`vamsbench` will use monotonic raw host time, pre-fault mapped/pinned buffers, a
-warm-up interval, then at least five measured runs. It records exact git commit,
-QEMU/Zephyr/compiler/kernel versions, host CPU/model, governor, VM vCPU count,
-ring depth, payload size, opcode, timeout, interrupt/coalescing/poll settings,
-and random seed. Raw JSON/CSV and a human summary are retained.
+Use `make stress-smoke` for a short development run of 10,000 commands, 32
+resets, 16 payload samples, and one virtual hour. Full-run parameters can be
+overridden without modifying the test, for example:
 
-Test sizes are 64 B, 256 B, 1 KiB, 4 KiB, 64 KiB, 1 MiB, and 16 MiB where legal.
-Queue depths are 16, 64, 256, and 1024. Runs cover synchronous queue depth 1,
-steady-state maximum safe occupancy, interrupt mode, lost-interrupt polling,
-and recovery. CRC/vector tests initialize buffers outside the measured region;
-every run samples or fully verifies output as appropriate.
+```sh
+make stress-qualification \
+  VAMS_STRESS_COMMANDS=2000000 \
+  VAMS_STRESS_RESETS=2000 \
+  VAMS_STRESS_PAYLOAD_SAMPLES=512 \
+  VAMS_STRESS_VIRTUAL_HOURS=72
+```
 
-Host load and unrelated processes are recorded. CPU affinity and fixed governor
-are recommendations, not silently applied by scripts. QEMU virtual time must not
-be compared directly with host wall time; each metric names its clock domain.
-At least one baseline NOP run isolates control-plane cost.
+## Clock domains and interpretation
 
-## Acceptance and reporting
+NOP latency is measured per full queue batch from SQ-tail publication through
+completion readback; it is not presented as single-command latency. Payload
+latency includes explicit virtual-time engine advancement. Throughput and
+latency use the host monotonic clock, while endurance uses QEMU virtual time.
+Every report states this scope. No numerical pass threshold is inferred from a
+developer workstation; a pinned CI runner must establish and version a
+statistically controlled regression baseline.
 
-Phase 9 defines numerical regression thresholds from a checked-in baseline on a
-named CI runner; Phase 0 invents none. A candidate regression is compared with
-confidence intervals or repeated medians and is never hidden by averaging
-failures. Correctness failures, timeouts, resets, or lost samples invalidate the
-performance run and remain visible.
+Firmware resource lines are emitted after all service tasks have made progress.
+Static SRAM is derived from the linked image bounds. Stack use comes from
+Zephyr initialized-stack scanning. Pool and message-queue values are retained
+high-water marks, and watchdog margin is the configured timeout minus the
+largest observed successful pet interval. These measurements justify later
+stack/pool tuning but do not replace overload and memory-pressure testing.
 
-The final report separates measured QEMU behavior from design targets, includes
-raw artifacts and commands, and explains bottlenecks. README numbers are added
-only after the automated benchmark reproduces them.
+## Controlled benchmark extension
+
+Release benchmarking adds warm-up and at least five measured repetitions for
+64 B, 256 B, 1 KiB, 4 KiB, 64 KiB, 1 MiB, and 16 MiB payloads where legal. It
+records the exact commit, QEMU/Zephyr/compiler/kernel versions, CPU model, host
+load, VM topology, ring depth, opcode, timeout, interrupt/coalescing settings,
+and random seed. CPU affinity and a fixed governor may be recommended but are
+never changed silently by the scripts.
+
+Future reports also cover firmware acceptance-to-publication latency, engine
+utilization, scheduler delay, interrupt-to-thread latency, recovery duration,
+DMA bytes, host/QEMU CPU time, polling wakeups, log drops, and telemetry
+saturation. Raw artifacts and failures remain visible; averages cannot hide an
+outlier or recovery error.

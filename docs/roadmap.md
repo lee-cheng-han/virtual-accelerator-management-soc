@@ -53,8 +53,14 @@ directional payload DMA failures, and reset after engine activation. Nth-match
 selection, sticky/saturating evidence, a cold-reset-only lock, engine-start and
 pre-CQ pause/release checkpoints, and a clean command after every recovery are
 validated. Firmware-task and mailbox faults remain cross-subsystem extensions;
-million-command, reset-storm, resource, latency, and endurance evidence are the
-next acceptance gate.
+The hardware-free qualification now completes one million mixed commands,
+1,000 deterministic queue resets, 61,650 ring wraps at 15/16 occupancy, and 24
+hours of virtual time with no stale or duplicate completion. It publishes
+host-clock latency distributions and machine-readable environment/evidence.
+Firmware resource telemetry now measures linked SRAM, every service stack,
+fixed-pool/queue high-water, and watchdog margin; rebuilding and capturing that
+new firmware image plus establishing a pinned performance baseline close the
+current gate.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
@@ -90,7 +96,7 @@ explicitly planned and are not counted as implemented.
 | Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
 | Memory-order verification | Queue transport documents host/device ownership and QEMU DMA ordering; model and integration tests exercise the normal publication chain. | Independently delayed release/acquire checkpoints from descriptor write through CQ visibility, interrupt, and host consumption. |
 | Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
-| Stress/performance | Queue model covers wrap, backpressure, errors, interrupts, and reset under four seeds. | Million-command/reset qualification, latency distributions, stack/SRAM high-water, and watchdog margin. |
+| Stress/performance | Queue model plus deterministic qualification cover one million mixed commands, 1,000 resets, queue wrap/high-water, 24 virtual hours, integrity, liveness, and host-clock latency distributions. Firmware emits stack/SRAM/pool/queue/watchdog resource evidence. | Capture loaded firmware resource measurements on the rebuilt image, establish a pinned-runner baseline, and add concurrent-process, process-exit, memory-pressure, and extended-fault qualification. |
 | Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; debug faults are property-gated, absent from production capabilities, and lockable until cold reset. | DMA-aperture enforcement, per-process buffer ownership, privilege checks, hostile-parser coverage, and reset/removal isolation tests. |
 | Requirement traceability | Generated ABI artifacts and normative documents define the current cross-layer contract. | Stable requirement IDs linked to design, implementation, test, CI evidence, and explicit limitation in a generated compliance matrix. |
 | Reproducible CI and demo | Generated ABI checks, strict builds, and source hygiene run in lightweight CI; hardware-free fuzz regressions have replayable seeds. | Pinned images/toolchains, sanitizer/static-analysis CI, compatibility matrix, evidence archive, and one-command boot/submit/verify/fault/recover report. |
@@ -106,9 +112,9 @@ explicitly planned and are not counted as implemented.
 3. Add independently controlled memory-order tests and the merged structured
    trace needed to diagnose failures across firmware, QEMU, kernel, and
    userspace.
-4. Qualify with million-command, reset-storm, concurrent-process, process-exit,
-   memory-pressure, and long-duration watchdog runs while collecting latency,
-   queue, stack, SRAM, and recovery evidence.
+4. Extend the million-command/reset/endurance qualification with
+   concurrent-process, process-exit, memory-pressure, and long-duration
+   watchdog runs while collecting loaded resource and recovery evidence.
 5. Pin the build matrix, enable sanitizers/static analysis/coverage-guided
    fuzzing, generate the requirements-to-evidence matrix, and deliver a single
    hardware-free `make demo` with machine-readable PASS/FAIL output.

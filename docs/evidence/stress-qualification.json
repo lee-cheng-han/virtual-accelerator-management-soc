@@ -1,0 +1,63 @@
+{
+  "configuration": {
+    "commands": 1000000,
+    "payload_samples": 256,
+    "queue_depth": 16,
+    "resets": 1000,
+    "virtual_hours": 24,
+    "workload_order": "deterministic"
+  },
+  "correctness": {
+    "completed": 1000000,
+    "completion_failures": 0,
+    "payload_commands": {
+      "crc32": 64,
+      "mem_copy": 64,
+      "mem_fill": 64,
+      "vector_add": 64
+    },
+    "post_endurance_liveness": "PASS",
+    "queue_high_water": 15,
+    "resets_completed": 1000,
+    "ring_wraps": 61650,
+    "stale_or_duplicate_completions": 0
+  },
+  "environment": {
+    "host": "Linux-6.18.33.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "qemu_sha256": "ff53f92973dd7d57ad4eafe277ace28b6043a31165a374e2dbaea944aa44448e",
+    "qemu_version": "QEMU emulator version 11.0.50 (v11.0.0-2775-g94826ec137-dirty)",
+    "source_dirty": true,
+    "source_revision": "9fd08252a970b9989d1cb49e47b3fefadc283bea"
+  },
+  "performance": {
+    "commands_per_host_second": 20687.973,
+    "host_elapsed_seconds": 48.337263,
+    "nop_batch_latency": {
+      "max_us": 6805.443,
+      "mean_us": 372.757,
+      "min_us": 181.083,
+      "p50_us": 293.904,
+      "p90_us": 574.371,
+      "p99_9_us": 2089.314,
+      "p99_us": 1082.992,
+      "samples": 66650,
+      "stddev_us": 192.65
+    },
+    "payload_latency": {
+      "max_us": 1928.941,
+      "mean_us": 498.077,
+      "min_us": 320.042,
+      "p50_us": 384.63,
+      "p90_us": 812.817,
+      "p99_9_us": 1928.941,
+      "p99_us": 1481.255,
+      "samples": 256,
+      "stddev_us": 246.477
+    },
+    "post_endurance_liveness_us": 812.865
+  },
+  "result": "PASS",
+  "schema": "vams-stress-qualification-v1",
+  "scope": "QEMU host-clock regression evidence; not physical-device performance"
+}

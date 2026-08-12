@@ -123,5 +123,7 @@ then requires healthy telemetry after recovery. Register details are in the
   portal stages descriptors instead of fetching them through PCI DMA.
 - Current mailbox and command test injection uses QEMU properties; PCIe event
   and DMA routing is the next integration step.
-- Stack sentinel and initialized-stack checks are enabled, but measured
-  per-thread high-water evidence has not yet been collected.
+- Stack sentinel, initialized-stack scanning, and per-thread high-water
+  reporting are enabled. The firmware also reports linked static SRAM,
+  command-pool and pipeline-queue high-water, and watchdog pet margin after all
+  service tasks demonstrate progress.

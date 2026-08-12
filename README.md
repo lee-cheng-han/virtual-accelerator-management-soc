@@ -6,7 +6,7 @@ on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
 Linux PCI driver only exposes the queues and lifecycle controls.
 
-> Status: **Deterministic fault injection complete.**
+> Status: **Hardware-free stress qualification implemented.**
 > The
 > custom QEMU machine runs bare-metal and Zephyr firmware with mailbox,
 > watchdog recovery, telemetry, and a private command portal. Zephyr now
@@ -29,6 +29,10 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > A property-gated debug block now injects six one-shot PCI faults, selects an
 > Nth matching transaction, pauses two named race windows, preserves evidence,
 > locks until cold reset, and requires a clean command after every recovery.
+> A deterministic qualification runner now verifies one million mixed commands,
+> 1,000 queue resets, 15/16 occupancy, latency distributions, and 24 hours of
+> virtual-time endurance. Firmware reports linked SRAM, per-task stack use,
+> fixed-pool/queue high-water, and watchdog margin without requiring a board.
 
 ## Architecture
 
@@ -103,6 +107,11 @@ internal management peripheral, not the host datapath.
 - Lost-interrupt CQ polling fallback and bounded request cancellation
 - Deterministic SQ/CQ reference-model comparison across randomized queue,
   wraparound, backpressure, interrupt, error, and reset sequences
+- Hardware-free million-command qualification with mixed payload integrity,
+  reset storms, queue-wrap/high-water evidence, latency distributions, and
+  post-endurance liveness
+- Runtime firmware resource evidence for static SRAM, every service stack,
+  fixed command pool, pipeline queues, and watchdog margin
 
 The normative documents are under [`docs/`](docs/). When a summary here and a
 normative document disagree, the normative document wins.
@@ -187,6 +196,12 @@ make scheduler-recovery-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make assurance-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make stress-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make stress-qualification \
+  CROSS_COMPILE=/path/to/riscv64-unknown-elf- \
+  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make queue-model-smoke \
@@ -221,6 +236,7 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [Fault and recovery](docs/fault-recovery.md) | Deterministic faults and reset hierarchy |
 | [Verification plan](docs/verification-plan.md) | Test layers and traceability |
 | [Performance plan](docs/performance-plan.md) | Metrics and reproducible method |
+| [Stress evidence](docs/evidence/stress-qualification.json) | Machine-readable million-command qualification result |
 | [Demo](docs/demo.md) | Current and final demo contracts |
 | [Minimal RISC-V subsystem](docs/minimal-riscv-subsystem.md) | QEMU and firmware bring-up contract |
 | [Zephyr board port](docs/zephyr-board-port.md) | RTOS board, timer, task IPC, and validation |

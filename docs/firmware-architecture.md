@@ -24,9 +24,12 @@ creates fixed-size command/event objects, publishes firmware version, then sets
 FW_RUNNING/READY. Dynamic allocation is forbidden after initialization. Before
 READY, host doorbells remain latched or are rejected without DMA.
 
-Provisional stacks are deliberately conservative and must be replaced by
-measured Phase 9 high-water data. Zephyr cooperative priority is negative and
-preemptible priority is nonnegative; lower numbers run first.
+Stacks remain deliberately conservative. The health task now reports initialized
+stack-scan high-water values for every running service, linked static SRAM,
+command-pool and queue occupancy, and watchdog margin. Those values are retained
+as qualification evidence before any stack is reduced. Zephyr cooperative
+priority is negative and preemptible priority is nonnegative; lower numbers run
+first.
 
 | Task | Priority | Stack | May block on | Responsibility |
 |---|---:|---:|---|---|

@@ -123,6 +123,13 @@ replay context on failure; `fuzz-smoke` runs them together and
 CRC of the destination, then checks non-round cross-chunk fill and vector
 operations including guards and source preservation. It reports host-clock
 QEMU throughput without a physical-performance claim or release threshold.
+`stress-smoke` is the development-sized form of the deterministic qualification
+runner. `stress-qualification` combines the queue model, bounded-DMA integrity,
+firmware resource report, one million verified mixed commands, 1,000 queue
+resets, sustained 15/16 queue occupancy, latency distributions, and 24 hours of
+virtual-time endurance. It writes a machine-readable report and requires a
+clean command after endurance; every timing value is explicitly host-clock
+QEMU evidence rather than a physical-device claim.
 `dma-engine-smoke` combines that bounded-engine test with the dual-QEMU Zephyr
 payload integration.
 `scheduler-recovery-smoke` boots a test-only delayed Zephyr scheduler, forces a

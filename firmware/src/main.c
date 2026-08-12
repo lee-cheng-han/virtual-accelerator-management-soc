@@ -75,8 +75,39 @@ static struct k_thread vams_health_thread;
 static atomic_t producer_epoch;
 static atomic_t monitor_epoch;
 static atomic_t mailbox_epoch;
+static atomic_t command_objects_in_use;
+static atomic_t command_pool_high_water;
+static atomic_t validation_queue_high_water;
+static atomic_t ready_queue_high_water;
+static atomic_t completion_queue_high_water;
 static uint32_t command_generation;
 static uint32_t command_sequence;
+
+extern char _image_ram_start[];
+extern char _image_ram_end[];
+
+static void vams_record_high_water(atomic_t *high_water, atomic_val_t value)
+{
+	atomic_val_t previous = atomic_get(high_water);
+
+	while (value > previous && !atomic_cas(high_water, previous, value)) {
+		previous = atomic_get(high_water);
+	}
+}
+
+static int vams_queue_put(struct k_msgq *queue, const void *data,
+			  atomic_t *high_water)
+{
+	const uint32_t used_before = k_msgq_num_used_get(queue);
+	const uint32_t capacity = used_before + k_msgq_num_free_get(queue);
+	const int status = k_msgq_put(queue, data, K_FOREVER);
+
+	if (status == 0) {
+		vams_record_high_water(high_water,
+				       (atomic_val_t)MIN(used_before + 1U, capacity));
+	}
+	return status;
+}
 
 static void vams_producer(void *unused1, void *unused2, void *unused3)
 {
@@ -161,6 +192,8 @@ static void vams_command_receiver(void *unused1, void *unused2, void *unused3)
 		status = k_mem_slab_alloc(&vams_command_pool, (void **)&command,
 					  K_FOREVER);
 		__ASSERT_NO_MSG(status == 0);
+		vams_record_high_water(&command_pool_high_water,
+				       atomic_inc(&command_objects_in_use) + 1);
 		memset(command, 0, sizeof(*command));
 		status = vams_command_receive(command_portal, &command->submission,
 					      K_FOREVER);
@@ -168,7 +201,8 @@ static void vams_command_receiver(void *unused1, void *unused2, void *unused3)
 		command_sequence++;
 		vams_scheduler_capture(command, command_generation,
 				       command_sequence, k_uptime_get());
-		status = k_msgq_put(&vams_validation_queue, &command, K_FOREVER);
+		status = vams_queue_put(&vams_validation_queue, &command,
+					&validation_queue_high_water);
 		__ASSERT_NO_MSG(status == 0);
 	}
 }
@@ -193,12 +227,13 @@ static void vams_command_validator(void *unused1, void *unused2, void *unused3)
 		    VAMS_STATUS_SUCCESS) {
 			vams_scheduler_transition(command, VAMS_COMMAND_VALIDATING,
 						  VAMS_COMMAND_COMPLETED_ERROR);
-			status = k_msgq_put(&vams_completion_queue, &command,
-						 K_FOREVER);
+			status = vams_queue_put(&vams_completion_queue, &command,
+						&completion_queue_high_water);
 		} else {
 			vams_scheduler_transition(command, VAMS_COMMAND_VALIDATING,
 						  VAMS_COMMAND_QUEUED);
-			status = k_msgq_put(&vams_ready_queue, &command, K_FOREVER);
+			status = vams_queue_put(&vams_ready_queue, &command,
+						&ready_queue_high_water);
 		}
 		__ASSERT_NO_MSG(status == 0);
 	}
@@ -263,7 +298,8 @@ static void vams_command_scheduler(void *unused1, void *unused2, void *unused3)
 			vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
 						  VAMS_COMMAND_COMPLETED);
 		}
-		status = k_msgq_put(&vams_completion_queue, &command, K_FOREVER);
+		status = vams_queue_put(&vams_completion_queue, &command,
+					&completion_queue_high_water);
 		__ASSERT_NO_MSG(status == 0);
 	}
 }
@@ -300,7 +336,70 @@ static void vams_command_completion(void *unused1, void *unused2, void *unused3)
 		vams_scheduler_transition(command, terminal_state, VAMS_COMMAND_FREE);
 		memset(command, 0, sizeof(*command));
 		k_mem_slab_free(&vams_command_pool, command);
+		atomic_dec(&command_objects_in_use);
 	}
+}
+
+static size_t vams_stack_used(struct k_thread *thread, size_t capacity)
+{
+	size_t unused = 0U;
+	const int status = k_thread_stack_space_get(thread, &unused);
+
+	__ASSERT_NO_MSG(status == 0);
+	return capacity - unused;
+}
+
+static void vams_report_resources(uint64_t watchdog_max_interval_ms)
+{
+	const size_t static_sram =
+		(size_t)((uintptr_t)_image_ram_end - (uintptr_t)_image_ram_start);
+	const uint64_t watchdog_margin_ms =
+		watchdog_max_interval_ms < VAMS_WATCHDOG_TIMEOUT_MS ?
+		VAMS_WATCHDOG_TIMEOUT_MS - watchdog_max_interval_ms : 0U;
+
+	printk("Resources: static_sram=%zu/%u pool_high=%" PRId32 "/%u"
+	       " validation_high=%" PRId32 "/%u ready_high=%" PRId32 "/%u"
+	       " completion_high=%" PRId32 "/%u\n",
+	       static_sram, CONFIG_SRAM_SIZE * 1024U,
+	       (int32_t)atomic_get(&command_pool_high_water),
+	       VAMS_COMMAND_POOL_SIZE,
+	       (int32_t)atomic_get(&validation_queue_high_water),
+	       VAMS_COMMAND_POOL_SIZE,
+	       (int32_t)atomic_get(&ready_queue_high_water),
+	       VAMS_COMMAND_POOL_SIZE,
+	       (int32_t)atomic_get(&completion_queue_high_water),
+	       VAMS_COMMAND_POOL_SIZE);
+	printk("Stacks: producer=%zu/%zu monitor=%zu/%zu mailbox=%zu/%zu"
+	       " receiver=%zu/%zu validator=%zu/%zu scheduler=%zu/%zu"
+	       " completion=%zu/%zu health=%zu/%zu\n",
+	       vams_stack_used(&vams_producer_thread,
+			       K_THREAD_STACK_SIZEOF(vams_producer_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_producer_stack),
+	       vams_stack_used(&vams_monitor_thread,
+			       K_THREAD_STACK_SIZEOF(vams_monitor_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_monitor_stack),
+	       vams_stack_used(&vams_mailbox_thread,
+			       K_THREAD_STACK_SIZEOF(vams_mailbox_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_mailbox_stack),
+	       vams_stack_used(&vams_receiver_thread,
+			       K_THREAD_STACK_SIZEOF(vams_receiver_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_receiver_stack),
+	       vams_stack_used(&vams_validator_thread,
+			       K_THREAD_STACK_SIZEOF(vams_validator_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_validator_stack),
+	       vams_stack_used(&vams_scheduler_thread,
+			       K_THREAD_STACK_SIZEOF(vams_scheduler_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_scheduler_stack),
+	       vams_stack_used(&vams_completion_thread,
+			       K_THREAD_STACK_SIZEOF(vams_completion_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_completion_stack),
+	       vams_stack_used(&vams_health_thread,
+			       K_THREAD_STACK_SIZEOF(vams_health_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_health_stack));
+	printk("Watchdog margin: timeout_ms=%u max_pet_interval_ms=%" PRIu64
+	       " margin_ms=%" PRIu64 "\n",
+	       VAMS_WATCHDOG_TIMEOUT_MS, watchdog_max_interval_ms,
+	       watchdog_margin_ms);
 }
 
 static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
@@ -311,6 +410,9 @@ static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 	atomic_val_t last_mailbox = atomic_get(&mailbox_epoch);
 	uint32_t heartbeat = 0U;
 	bool expiry_announced = false;
+	bool resources_reported = false;
+	uint64_t last_pet_ms = k_uptime_get();
+	uint64_t watchdog_max_interval_ms = 0U;
 
 	ARG_UNUSED(unused2);
 	ARG_UNUSED(unused3);
@@ -348,8 +450,18 @@ static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 			}
 		} else if (healthy) {
 			const int status = vams_management_watchdog_pet(management);
+			const uint64_t pet_interval_ms = uptime_ms - last_pet_ms;
 
 			__ASSERT_NO_MSG(status == 0);
+			last_pet_ms = uptime_ms;
+			if (pet_interval_ms > watchdog_max_interval_ms) {
+				watchdog_max_interval_ms = pet_interval_ms;
+			}
+		}
+
+		if (!resources_reported && heartbeat >= 4U) {
+			vams_report_resources(watchdog_max_interval_ms);
+			resources_reported = true;
 		}
 
 		last_producer = current_producer;

@@ -17,6 +17,7 @@ SPEC_DOCS += docs/asynchronous-engine.md
 SPEC_DOCS += docs/assurance.md
 SPEC_DOCS += docs/chunked-dma.md
 SPEC_DOCS += docs/firmware-scheduler.md
+SPEC_DOCS += docs/evidence/stress-qualification.json
 
 SPEC_DOCS += docs/linux-uapi.md
 
@@ -42,6 +43,10 @@ VAMS_SCHEDULER_FIRMWARE ?= $(ZEPHYR_SCHEDULER_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_DESCRIPTOR_FUZZ_SEED ?= 0xd35c0123
 VAMS_BAR_FUZZ_SEED ?= 0xba4f0223
 VAMS_FUZZ_ITERATIONS ?= 4096
+VAMS_STRESS_COMMANDS ?= 1000000
+VAMS_STRESS_RESETS ?= 1000
+VAMS_STRESS_PAYLOAD_SAMPLES ?= 256
+VAMS_STRESS_VIRTUAL_HOURS ?= 24
 
 .PHONY: help check check-docs abi-check firmware-scheduler-unit firmware smoke zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout \
@@ -51,6 +56,7 @@ VAMS_FUZZ_ITERATIONS ?= 4096
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
 	fault-injection-smoke \
 	payload-throughput-smoke \
+	stress-smoke firmware-resource-report stress-qualification \
 	dma-engine-smoke \
 	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
@@ -98,6 +104,11 @@ help:
 	  '                   Verify debug faults, checkpoints, and recovery' \
 	  '  make payload-throughput-smoke' \
 	  '                   Verify bounded DMA and report virtual throughput' \
+	  '  make stress-smoke Run a short queue/reset/endurance qualification' \
+	  '  make firmware-resource-report' \
+	  '                   Validate firmware stack/SRAM/queue/watchdog margins' \
+	  '  make stress-qualification' \
+	  '                   Run the million-command hardware-free qualification' \
 	  '  make dma-engine-smoke' \
 	  '                   Run firmware payload and bounded-engine validation' \
 	  '  make pcie-smoke   Verify PCIe identity, BAR0, MSI-X, and reset' \
@@ -131,7 +142,7 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Deterministic fault injection complete' README.md; \
+	grep -q 'Hardware-free stress qualification implemented' README.md; \
 	grep -q 'bounded 64 KiB DMA working chunk' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
@@ -284,6 +295,30 @@ payload-throughput-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/performance/vams-payload-throughput.py
 
+stress-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/stress/vams-stress-qualification.py \
+		--commands 10000 --resets 32 --payload-samples 16 \
+		--virtual-hours 1
+
+firmware-resource-report: zephyr
+	@mkdir -p build/reports
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
+	./qemu/tests/performance/vams-firmware-resources.py \
+		--json-output build/reports/firmware-resources.json
+
+stress-qualification: firmware-resource-report queue-model-smoke \
+	payload-throughput-smoke
+	@mkdir -p build/reports
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/stress/vams-stress-qualification.py \
+		--commands "$(VAMS_STRESS_COMMANDS)" \
+		--resets "$(VAMS_STRESS_RESETS)" \
+		--payload-samples "$(VAMS_STRESS_PAYLOAD_SAMPLES)" \
+		--virtual-hours "$(VAMS_STRESS_VIRTUAL_HOURS)" \
+		--json-output build/reports/stress-qualification.json
+
 dma-engine-smoke: firmware-pcie-smoke payload-throughput-smoke
 
 pcie-smoke:
@@ -316,7 +351,7 @@ source-check:
 	python3 -m py_compile scripts/*.py tests/abi/*.py \
 		qemu/tests/*.py qemu/tests/qtest/*.py qemu/tests/fuzz/*.py \
 		qemu/tests/fault/*.py \
-		qemu/tests/performance/*.py
+		qemu/tests/performance/*.py qemu/tests/stress/*.py
 	@set -eu; \
 	for script in scripts/*.sh qemu/tests/*.sh kernel/tests/*.sh; do \
 		sh -n "$$script"; \

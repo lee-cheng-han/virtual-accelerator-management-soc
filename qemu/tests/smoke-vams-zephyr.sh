@@ -38,7 +38,10 @@ for checkpoint in \
     'Tasks: producer -> message queue -> monitor' \
     'Heartbeat: sequence=1 ' \
     'Heartbeat: sequence=2 ' \
-    'Heartbeat: sequence=3 '
+    'Heartbeat: sequence=3 ' \
+    'Resources: static_sram=' \
+    'Stacks: producer=' \
+    'Watchdog margin: timeout_ms=1000 '
 do
     grep -Fq "$checkpoint" "$output" || {
         cat "$output" >&2
@@ -46,5 +49,11 @@ do
         exit 1
     }
 done
+
+grep -Eq 'Watchdog margin: timeout_ms=1000 max_pet_interval_ms=[0-9]+ margin_ms=[1-9][0-9]*' "$output" || {
+    cat "$output" >&2
+    echo 'firmware did not retain positive watchdog margin' >&2
+    exit 1
+}
 
 echo 'VAMS Zephyr boot and IPC smoke test: PASS'
