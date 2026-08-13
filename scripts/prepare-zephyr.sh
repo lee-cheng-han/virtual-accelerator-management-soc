@@ -3,11 +3,12 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_root/tools/versions.env"
 workspace=${ZEPHYR_WORKSPACE:-"$repo_root/build/zephyrproject"}
 zephyr_dir="$workspace/zephyr"
 venv=${ZEPHYR_VENV:-"$repo_root/build/zephyr-venv"}
-version=v4.4.0
-commit=684c9e8f32e4373a21098559f748f06915f950c9
+version=v$VAMS_ZEPHYR_VERSION
+commit=$VAMS_ZEPHYR_COMMIT
 
 mkdir -p "$workspace"
 

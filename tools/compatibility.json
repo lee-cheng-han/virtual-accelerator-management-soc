@@ -1,0 +1,24 @@
+{
+  "schema": "vams-compatibility-v1",
+  "virtual_platform": {
+    "qemu_commit": "94826ec1370328375c3b6d1e80fdc94c8f46c348",
+    "qemu_version": "11.0.50",
+    "zephyr_commit": "684c9e8f32e4373a21098559f748f06915f950c9",
+    "zephyr_version": "4.4.0"
+  },
+  "interfaces": [
+    {
+      "descriptor_major": 1,
+      "firmware_major": 1,
+      "hardware_interface_major": 1,
+      "linux_uapi": 1,
+      "status": "supported"
+    }
+  ],
+  "compatibility_rules": {
+    "unknown_descriptor_major": "reject",
+    "unknown_hardware_major": "driver_refuses_probe",
+    "unknown_linux_uapi": "reject",
+    "unknown_minor_capabilities": "ignore_unless_required"
+  }
+}

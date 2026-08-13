@@ -1,58 +1,67 @@
-# Demo contract
+# Hardware-free demo contract
 
-## Current component demonstrations
+`make demo` is a noninteractive demonstration of the implemented accelerator
+and real Zephyr control plane. It requires prepared QEMU and firmware artifacts,
+but requires no PCIe card, FPGA, development board, root access, or network.
 
-The complete Linux-guest orchestration is not implemented yet, but the
-accelerator, real Zephyr control plane, DMA operations, recovery, and fault
-controls have executable hardware-free demonstrations:
+Prepare the exact QEMU source revision and patch series once:
 
 ```sh
-make check
-make firmware-pcie-smoke \
-  CROSS_COMPILE=/path/to/riscv64-unknown-elf- \
-  QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32 \
-  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
-make fault-injection-smoke \
-  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make qemu-prepare
 ```
 
-These commands validate documentation/ABI/source hygiene, carry PCI descriptors
-through real firmware, verify all payload operations and reset recovery, then
-exercise six debug-only faults and two race checkpoints. They do not yet claim
-the final guest-driver/userspace workflow or physical performance.
+Build the firmware with the pinned Zephyr source and a compatible RV32 GCC
+toolchain, then run the offline demo:
 
-## Incremental demonstrations
+```sh
+make zephyr-prepare
+make zephyr CROSS_COMPILE=/path/to/riscv64-unknown-elf-
+make demo
+```
 
-Each phase adds one observable proof: Phase 1 prints the RV32 boot
-banner; Phase 2 boots Zephyr and task heartbeat; Phase 3 exercises mailbox and
-watchdog; Phase 4 enumerates/probes and raises a test MSI-X; Phase 5 round-trips
-NOP ID/cookie; Phase 6 verifies data operations; Phase 7 recovers a timeout;
-Phase 8 demonstrates deterministic faults; all demonstrations through Phase 8
-are implemented. Phase 9 will add the reproducible qualification report.
+The demo fails during preflight unless both QEMU binaries identify the pinned
+source revision and the Zephyr ELF is present. It then runs these fail-fast
+stages with explicit process timeouts:
 
-## Final `make demo` acceptance
+1. generated contracts, release inputs, host unit tests, and source hygiene;
+2. PCI descriptors through the real RV32 Zephyr validation/scheduler service;
+3. copy, fill, CRC32, and vector data integrity including the 16 MiB DMA path;
+4. all deterministic PCI fault classes and clean recovery commands;
+5. a development-sized queue/reset/endurance stress run.
 
-Phase 10's noninteractive command must build pinned QEMU/firmware/driver/tools,
-boot a prepared Linux guest and RISC-V firmware, wait with explicit timeouts,
-load `vams_pci.ko`, display hardware/firmware/descriptor versions, run NOP/copy/
-fill/CRC/vector commands with data verification, snapshot telemetry, inject one
-DMA timeout or dropped interrupt, prove recovery with a clean NOP, shut down,
-and print exactly one final PASS or FAIL summary.
+Each stage writes its complete output under `build/demo/<UTC timestamp>/`.
+`report.json` records the source revision and dirty state, exact dependency
+pins, host details, artifact paths and SHA-256 hashes, commands, durations,
+exit status, and log names. A failed stage preserves all earlier logs. Console
+output ends in exactly one `VAMS DEMO: PASS` or `VAMS DEMO: FAIL` line.
 
-The script captures QEMU, guest kernel, firmware UART, and test logs under a
-timestamped result directory. Failure at any step preserves logs, exits nonzero,
-and identifies the failed stage. It must not require interactive input, root on
-the host beyond documented virtualization access, or network access after
-dependencies/images are prepared. A `VAMS_KEEP_VM=1` diagnostic option may keep
-the failed VM alive, but default CI behavior always cleans up.
+Use `VAMS_DEMO_OUTPUT=/path` to select a result directory or override
+`VAMS_DEMO_QEMU_RISCV32`, `VAMS_DEMO_QEMU_X86_64`, and
+`VAMS_ZEPHYR_FIRMWARE` for verified artifacts in another location.
 
-Expected high-level output (future, not implemented):
+Example high-level output:
 
 ```text
-VAMS hardware interface 1.0, firmware <built-version>
-queue pair: depth=<n>, MSI-X: ready
-NOP: PASS  COPY: PASS  FILL: PASS  CRC32: PASS  VECTOR_ADD: PASS
-fault: <name> triggered; recovery generation <old> -> <new>
-post-recovery NOP: PASS
+source-contract: PASS
+firmware-pcie: PASS
+payload-integrity: PASS
+fault-recovery: PASS
+queue-stress: PASS
+VAMS demo evidence: build/demo/20260811T120000Z
 VAMS DEMO: PASS
 ```
+
+## Remaining release demonstration work
+
+The current orchestrator demonstrates the actual firmware-owned command path,
+payload engine, fault controls, and recovery directly through QTest. It does not
+yet package a pinned Linux guest image or run the public driver/userspace API in
+the same invocation. `kernel-smoke` separately boots a disposable Linux guest,
+loads `vams_pci.ko`, exercises MSI-X and polling completion, runs concurrent NOP
+requests, and verifies cleanup.
+
+The final release demo will compose that guest test with this orchestrator once
+the guest kernel, matching headers, static BusyBox, module, and userspace client
+have reproducible artifact manifests. Payload mapping and asynchronous public
+userspace commands must also exist before the guest can honestly demonstrate
+copy/fill/CRC/vector through `/dev/vamsN`.

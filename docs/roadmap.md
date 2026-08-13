@@ -19,8 +19,8 @@ the phase or milestone number. A later phase may not make an earlier gate flaky.
 | **9 — Stress/performance** | Model/property queue tests, ring wrap, million-command and long-duration runs, repeated reset, histogram, throughput, stack/SRAM use, watchdog margin and queue high-water report. |
 | **10 — CI/demo** | Pinned reproducible builds, compatibility matrix, coverage/static analysis/fuzzing and layered tests in CI; unified trace export; `make demo` boots, submits, verifies, faults, recovers, and reports PASS/FAIL. |
 
-Current gate: stress and performance qualification. Deterministic fault
-injection is complete.
+Current gate: reproducible CI and integrated demonstration. Deterministic fault
+injection and core stress qualification are complete.
 In addition to coherent PCI
 SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
@@ -59,8 +59,16 @@ hours of virtual time with no stale or duplicate completion. It publishes
 host-clock latency distributions and machine-readable environment/evidence.
 Firmware resource telemetry now measures linked SRAM, every service stack,
 fixed-pool/queue high-water, and watchdog margin; rebuilding and capturing that
-new firmware image plus establishing a pinned performance baseline close the
-current gate.
+new firmware image plus establishing a pinned performance baseline remain
+qualification follow-up work. QEMU and Zephyr revisions are now centralized;
+the QEMU patch and resulting source transformations are content verified. CI
+checks source/contracts and clean patch application on every change, while
+main/manual runs build QEMU and execute model, fuzz, fault, and stress suites.
+The offline `make demo` verifies pinned QEMU identities and then runs the real
+firmware bridge, all payload operations, deterministic recovery, and queue
+stress with per-stage logs and JSON evidence. Reproducible Linux guest artifacts,
+public payload UAPI coverage, unified trace export, and the fully composed guest
+demo remain before Release 1 completion.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
@@ -99,7 +107,7 @@ explicitly planned and are not counted as implemented.
 | Stress/performance | Queue model plus deterministic qualification cover one million mixed commands, 1,000 resets, queue wrap/high-water, 24 virtual hours, integrity, liveness, and host-clock latency distributions. Firmware emits stack/SRAM/pool/queue/watchdog resource evidence. | Capture loaded firmware resource measurements on the rebuilt image, establish a pinned-runner baseline, and add concurrent-process, process-exit, memory-pressure, and extended-fault qualification. |
 | Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; debug faults are property-gated, absent from production capabilities, and lockable until cold reset. | DMA-aperture enforcement, per-process buffer ownership, privilege checks, hostile-parser coverage, and reset/removal isolation tests. |
 | Requirement traceability | Generated ABI artifacts and normative documents define the current cross-layer contract. | Stable requirement IDs linked to design, implementation, test, CI evidence, and explicit limitation in a generated compliance matrix. |
-| Reproducible CI and demo | Generated ABI checks, strict builds, and source hygiene run in lightweight CI; hardware-free fuzz regressions have replayable seeds. | Pinned images/toolchains, sanitizer/static-analysis CI, compatibility matrix, evidence archive, and one-command boot/submit/verify/fault/recover report. |
+| Reproducible CI and demo | Central pins, QEMU patch/source hashes, compatibility data, release-evidence validation, clean patch CI, main/manual virtual regressions, and an offline one-command firmware/payload/fault/stress demo with archived JSON/logs are implemented. | Hash-locked compiler/guest artifacts, sanitizer/static-analysis/coverage jobs, unified traces, public payload UAPI, and composition of the Linux guest test into the demo. |
 
 ### Near-term implementation order
 
@@ -115,9 +123,268 @@ explicitly planned and are not counted as implemented.
 4. Extend the million-command/reset/endurance qualification with
    concurrent-process, process-exit, memory-pressure, and long-duration
    watchdog runs while collecting loaded resource and recovery evidence.
-5. Pin the build matrix, enable sanitizers/static analysis/coverage-guided
-   fuzzing, generate the requirements-to-evidence matrix, and deliver a single
-   hardware-free `make demo` with machine-readable PASS/FAIL output.
+5. Finish hash-locking the build matrix, enable sanitizers/static analysis and
+   coverage-guided fuzzing, generate the requirements-to-evidence matrix, and
+   compose the reproducible Linux guest/public UAPI into the existing
+   hardware-free `make demo` report.
+
+## Complete industry improvement backlog
+
+This backlog is the authoritative implementation plan for closing the gap
+between the current portfolio-quality virtual platform and an industry-grade
+firmware product. Items are ordered by dependency and risk. Adding accelerator
+opcodes does not take priority over ownership, isolation, lifecycle safety, or
+reproducibility. Every required gate remains hardware-free.
+
+### Work package A — Firmware command and recovery ownership
+
+- Add a firmware DMA-result task and an explicit request/result event protocol
+  between the scheduler, modeled engine, and completion service.
+- Add running-command abort request/acknowledgment, bounded reset acknowledgment,
+  result acknowledgment, bridge-disconnect reconciliation, and exactly-once
+  terminal publication.
+- Add one high-priority recovery manager that serializes engine, queue, device,
+  watchdog, and bridge recovery and owns generation changes and escalation
+  counters.
+- Add CQ-backpressure watermarks and deterministic overload behavior for full
+  slabs, firmware queues, host CQ, telemetry, and logs. No resource-exhaustion
+  path may block forever or silently discard owned work.
+
+Acceptance requires firmware ownership from descriptor capture through terminal
+acknowledgment, bounded recovery at every scope, no command with two owners, no
+lost or duplicate result, and clean progress after engine timeout, queue reset,
+device reset, watchdog reset, CQ saturation, and bridge disconnect.
+
+### Work package B — Firmware resource, health, and crash engineering
+
+- Run worst-case command, fault, overload, and recovery workloads; capture all
+  task, ISR, main, and idle stack high-water values; justify each configured
+  stack with a documented safety margin and enforce a regression floor in CI.
+- Extend watchdog policy with per-task deadlines, startup/recovery grace periods,
+  stuck-task identity, consecutive-failure thresholds, pet jitter, saturating
+  counters, and tests for each independently frozen task.
+- Add versioned, bounded, nonblocking structured firmware events with severity,
+  command identity, generation, engine epoch, state transition, timestamp/clock
+  domain, queue indices, error context, and explicit drop accounting.
+- Model retained SRAM or nonvolatile storage for boot count, reset cause, last
+  assertion, last active command, stack failure, generations, bounded recent
+  events, record version, and CRC. Test partial, corrupt, and old records.
+- Add Zephyr `ztest` or portable host tests for validation precedence, timeout
+  wraparound, EDF/FIFO order, ownership transitions, recovery escalation,
+  watchdog policy, mailbox parsing, telemetry encoding, and persistent records.
+
+Acceptance requires positive measured stack/watchdog/SRAM margins under the
+qualification workload, deterministic diagnosis of a deliberately stalled task,
+and useful crash evidence after every modeled fatal reset without payload or
+native-address disclosure.
+
+### Work package C — Complete Linux payload and asynchronous API
+
+- Add registered/pinned userspace DMA buffers and public copy, fill, CRC32, and
+  vector operations instead of exposing raw guest addresses.
+- Add asynchronous submit/wait, multiple outstanding requests, `poll`/`epoll`,
+  cancellation, timeouts, reset control, and a stable `libvams` wrapper.
+- Track commands and mappings per file descriptor across completion, reset,
+  close, process exit, device removal, and module unload; define 32-bit
+  compatibility behavior.
+- Harden close during DMA, reset during completion, remove during ioctl/IRQ,
+  unknown or duplicate completion, concurrent reset, and completion after file
+  teardown.
+- Add non-ABI `debugfs` state and kernel tracepoints for queues, requests,
+  interrupts, polling, DMA bytes, timeout, cancellation, reset, and removal.
+
+Acceptance requires all v1 operations through `/dev/vamsN`, concurrent
+processes, asynchronous completion, safe exit/removal with work outstanding,
+and zero leaked mappings, requests, or use-after-free reports under kernel
+debugging configurations.
+
+### Work package D — DMA security and process isolation
+
+- Enforce a per-file DMA aperture using opaque mapping handles, bounds,
+  read/write permissions, lifetime reference counts, and safe unmap semantics.
+- Reject cross-process, stale, overflowed, permission-incompatible, or
+  reset-invalid mappings before payload access.
+- Add a modeled IOMMU translation/fault path and adversarial tests proving a
+  command cannot touch unrelated guest or process memory.
+- Write a threat model covering malicious descriptors, compromised userspace or
+  guest kernel, image tampering, rollback, debug abuse, reset abuse, denial of
+  service, persistent-state corruption, and diagnostic leakage; state the
+  virtual device's trust boundaries and non-goals.
+
+Acceptance requires hostile multi-process and reset/removal tests with no DMA
+outside an authorized mapping and documented residual risk for threats that the
+virtual device cannot mitigate.
+
+### Work package E — Device-model concurrency and ordering
+
+- Add independently controllable checkpoints for descriptor write/release,
+  SQ-tail publication, device acquire/fetch, capture before SQ-head, payload
+  completion, CQ DMA, CQ-tail publication, MSI-X delivery, and host acquire.
+- Extend deterministic faults with Nth-chunk failure, descriptor-fetch pause,
+  pre-SQ-head pause, post-completion-DMA pause, pre-interrupt pause, firmware
+  task freeze, mailbox corruption, bridge loss, QEMU termination, CQ-full reset,
+  and reset between result publication and acknowledgment.
+- Execute payload DMA as asynchronous chunks with cancellation points,
+  configurable latency/bandwidth, bounded outstanding operations, channel
+  contention, internal partial progress, byte accounting, and utilization
+  counters. Partial internal progress must never become a false success.
+- Exercise queue depths 16, 64, 256, and 1024, repeated wrap at each depth,
+  saturation, invalid configurations, post-reset reconfiguration, and MSI-X
+  mappings. Multiple queue pairs remain an explicitly versioned extension.
+- Add quiesced migration state serialization or explicit safe rejection while
+  busy, with compatibility tests for registers, indices, generations, timers,
+  engine state, and production/debug differences.
+
+Acceptance requires executable ordering proofs at every ownership boundary,
+deterministic replay for every new race, cancellation between any two DMA
+chunks, and no stale visibility across reset or migration.
+
+### Work package F — Full Linux guest demonstration
+
+- Pin and hash a Linux source/configuration, matching headers and kernel image,
+  static BusyBox, module, initramfs recipe, and userspace tools.
+- Extend `make demo` to boot management firmware and the Linux guest, load the
+  driver, report hardware/firmware/ABI/UAPI versions, run every command through
+  the public API, independently verify output, inject a fault, prove recovery,
+  collect telemetry/traces, and shut down cleanly.
+- Preserve firmware UART, QEMU, guest kernel, driver, userspace, and test logs
+  plus artifact hashes and a single aggregate JSON result.
+
+Acceptance is one offline, noninteractive, unprivileged command ending in
+exactly one PASS/FAIL summary and demonstrating the same public interface an
+application would use. Direct QTest remains lower-layer evidence, not a
+substitute for this gate.
+
+### Work package G — Security boot and update lifecycle
+
+- Add a modeled immutable root of trust, signed manifest verification, firmware
+  identity measurement, version/compatibility policy, anti-rollback state, and
+  atomic A/B update metadata.
+- Inject interruption at every erase, write, verify, and metadata transition;
+  retain either the prior valid image or a constrained authenticated recovery
+  path. Test wrong key, corruption, rollback, incompatible image, metadata
+  damage, key rotation, and recovery abuse.
+- Define development, provisioning, production, recovery, and decommissioning
+  key/debug states. Keep signing keys outside source and artifacts, and prove
+  production builds omit or permanently gate test fault controls.
+
+Acceptance requires that untrusted firmware never executes, the last bootable
+image is never destroyed by an interrupted update, rollback policy is enforced,
+and production-mode debug cannot be enabled by normal guest actions.
+
+### Work package H — Verification depth and traceability
+
+- Assign stable requirement IDs and generate a compliance matrix linking each
+  requirement to design, implementation owner, test, CI job, evidence artifact,
+  result, and limitation.
+- Add coverage-guided descriptor, MMIO, queue/reset/interrupt, mailbox, firmware
+  event, and persistent-record fuzzers with seed corpora, minimization, replay,
+  and permanent regression inputs for every discovered defect.
+- Run ASan, UBSan, LeakSanitizer, Clang static analysis, GCC `-fanalyzer`,
+  CodeQL, branch coverage, and focused mutation tests on host/QEMU components.
+- Run the driver with `W=1`/`W=2`, Sparse, Smatch, Coccinelle, KUnit, Lockdep,
+  KASAN, UBSAN, DMA API debugging, forced allocation failures, and repeated
+  bind/unbind/load/unload.
+
+Acceptance requires no unexplained sanitizer/static-analysis findings,
+traceable evidence for every release requirement, and measured coverage of all
+security-, validation-, ownership-, timeout-, and recovery-relevant branches.
+
+### Work package I — Reliability and performance qualification
+
+- Extend qualification to several million mixed commands, thousands of every
+  reset scope, extended fault sequences, concurrent users, process/QEMU exit,
+  memory pressure, CQ backpressure, repeated driver and firmware restart, clock
+  variation, telemetry saturation, and controlled host load.
+- On a pinned runner, baseline commands/s, payload throughput by size/opcode,
+  p50/p90/p99/p99.9/max latency, recovery duration, engine utilization,
+  interrupts/command, polling wakeups, CPU use, queue occupancy, firmware stack
+  and SRAM high-water, and watchdog margin.
+- Store raw machine-readable evidence, seeds, resource constraints, failure
+  disposition, and confidence/regression bands. Any correctness failure
+  invalidates the affected timing result and restarts its endurance run.
+
+Acceptance requires zero unexplained hang, corruption, stale/duplicate
+completion, mapping leak, invariant violation, watchdog reset, or security-policy
+bypass for the documented duration and workload.
+
+### Work package J — Hermetic builds and layered CI
+
+- Hash-lock the RISC-V compiler, Zephyr Python wheels, host container, QEMU
+  dependencies, Linux kernel/headers, BusyBox, guest filesystem, CI actions, and
+  generated artifact manifest.
+- Provide a container, Nix, or Guix environment with fixed locale/timestamps,
+  no host-tool leakage, offline rebuild after acquisition, compiler/linker
+  identity, SBOM, provenance, and repeated-build hash comparison.
+- Layer CI into contract/docs, GCC/Clang units, QEMU apply/build, QTest/model,
+  sanitizers, fuzz smoke/extended fuzz, Zephyr build/smoke/resources, kernel
+  matrix, guest integration, full demo, nightly million-command, scheduled
+  endurance, and release reproducibility jobs.
+
+Acceptance requires a clean-host build from the manifest, offline validation,
+and reproducible release artifacts or a documented and bounded source of any
+remaining nondeterminism.
+
+### Work package K — Operator tools and unified observability
+
+- Implement `vamsctl info`, `health`, `queue-status`, `submit`, `wait`, `reset`,
+  `fault`, `trace`, `self-test`, and `benchmark` with consistent text and JSON.
+- Correlate firmware, QEMU, kernel, and userspace events by command ID, cookie,
+  reset generation, engine epoch, DMA operation, and named clock domain.
+- Generate a static HTML qualification dashboard containing artifact identity,
+  test results, command/reset counts, latency/throughput distributions, resource
+  margins, fault coverage, failures, and known limitations.
+- Document operator procedures for health, update, rollback, safe reset,
+  degraded operation, diagnostics, recovery, and decommissioning.
+
+Acceptance requires a single-command timeline for a normal, timed-out, and
+reset command, stable machine-readable CLI output, bounded drop reporting, and
+diagnostics that expose neither payloads, secrets, nor native pointers.
+
+### Work package L — Maintainability and generated engineering contracts
+
+- Adopt documented C/C++/Python/shell rules for conversions, endianness, MMIO,
+  DMA ownership, timeout arithmetic, lock ordering, errors, assertions, reset,
+  logging, allocation, and generated code.
+- Pin and apply `clang-format`, Python lint/format, ShellCheck, Markdown lint,
+  and kernel-style checks without introducing unrelated churn.
+- Extend the ABI schema to generate registers, bit fields, layouts, status/error
+  values, documentation tables, Python decoders, trace names, compatibility
+  metadata, and compile-time assertions while keeping behavior handwritten.
+- Record architecture decisions for firmware policy ownership, the dual-QEMU
+  bridge, ring semantics, heap-free operation, EDF, reset domains, and the
+  distinction between virtual timing and physical performance.
+- Define supported revisions, compatibility promises, release/rollback,
+  long-term support, backport, vulnerability response, and end-of-life policy.
+
+Acceptance requires automated style/contract checks, no hand-copied divergent
+ABI constants, reviewable architectural rationale, and a documented support
+policy for every released interface.
+
+### Optional post-release capability backlog
+
+Only after work packages A–L meet their release gates, evaluate scatter/gather
+DMA, multiple queue pairs and MSI-X vectors, a local-memory BAR, IOMMU-translated
+DMA, performance-monitoring registers, quiesced live migration, persistent
+virtual flash, multiple management cores, SR-IOV/PASID isolation, and modeled
+power/thermal states. Each feature requires a new or compatible ABI design,
+threat analysis, resource budget, compatibility plan, deterministic faults, and
+its own acceptance evidence. An FPGA or development-board port remains optional
+and never becomes a prerequisite for the virtual release.
+
+### Execution sequence
+
+1. Work packages A and B establish complete firmware ownership and measurable
+   recovery/resource behavior.
+2. Work packages C and D expose all payload commands safely through Linux while
+   enforcing process-scoped DMA isolation.
+3. Work package E proves ordering and cancellation under adversarial races.
+4. Work package F composes the public Linux path into the offline demo.
+5. Work packages H and J make verification traceable, analyzable, and hermetic.
+6. Work packages I and K produce release qualification and usable diagnostics.
+7. Work packages G and L close the security lifecycle and long-term maintenance
+   requirements.
+8. Optional post-release capabilities begin only after formal release sign-off.
 
 ## Release-quality engineering tracks
 

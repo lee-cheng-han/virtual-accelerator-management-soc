@@ -11,6 +11,8 @@ SPEC_DOCS := README.md \
 	docs/minimal-riscv-subsystem.md docs/zephyr-board-port.md \
 	docs/management-peripherals.md docs/pcie-endpoint.md \
 	docs/linux-pci-driver.md docs/nop-command-path.md \
+	docs/compatibility.md \
+	docs/reproducible-builds.md \
 	docs/mem-copy-command-path.md docs/mem-fill-command-path.md \
 	docs/crc32-command-path.md docs/vector-add-command-path.md
 SPEC_DOCS += docs/asynchronous-engine.md
@@ -47,8 +49,13 @@ VAMS_STRESS_COMMANDS ?= 1000000
 VAMS_STRESS_RESETS ?= 1000
 VAMS_STRESS_PAYLOAD_SAMPLES ?= 256
 VAMS_STRESS_VIRTUAL_HOURS ?= 24
+QEMU_SRC ?= $(CURDIR)/build/qemu-src
+QEMU_BUILD_DIR ?= $(QEMU_SRC)/build-vams
+VAMS_DEMO_QEMU_RISCV32 ?= $(QEMU_BUILD_DIR)/qemu-system-riscv32
+VAMS_DEMO_QEMU_X86_64 ?= $(QEMU_BUILD_DIR)/qemu-system-x86_64
+VAMS_DEMO_OUTPUT ?=
 
-.PHONY: help check check-docs abi-check firmware-scheduler-unit firmware smoke zephyr-prepare zephyr \
+.PHONY: help check check-docs release-input-check abi-check firmware-scheduler-unit firmware smoke qemu-prepare zephyr-prepare zephyr \
 	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout \
 	management-smoke management-mmio-smoke \
 	watchdog-smoke command-portal-smoke firmware-command-smoke \
@@ -72,6 +79,7 @@ help:
 	  '  make firmware-scheduler-unit' \
 	  '                   Verify firmware EDF ordering on the host' \
 	  '  make smoke       Boot the firmware and verify its UART transcript' \
+	  '  make qemu-prepare Build the exact pinned VAMS QEMU targets' \
 	  '  make zephyr-prepare' \
 	  '                   Fetch pinned Zephyr build dependencies' \
 	  '  make zephyr      Build the vams_riscv Zephyr application' \
@@ -129,10 +137,10 @@ help:
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
 	  '                   Check that the QEMU patch series applies cleanly' \
 	  '  make tree        Print the repository tree' \
-	  '  make demo        Explain full-demo availability' \
+	  '  make demo        Run the offline hardware-free system demonstration' \
 	  '  make clean       Remove generated output'
 
-check: check-docs abi-check firmware-scheduler-unit
+check: check-docs release-input-check abi-check firmware-scheduler-unit
 
 check-docs:
 	@set -eu; \
@@ -142,11 +150,14 @@ check-docs:
 	if LC_ALL=C grep -RIn '[[:blank:]]$$' README.md docs; then \
 		echo 'trailing whitespace found' >&2; exit 1; \
 	fi; \
-	grep -q 'Hardware-free stress qualification implemented' README.md; \
+	grep -q 'Offline hardware-free system demo implemented' README.md; \
 	grep -q 'bounded 64 KiB DMA working chunk' README.md; \
 	grep -q 'sizeof(struct vams_submission) == 64' docs/descriptor-format.md; \
 	grep -q 'sizeof(struct vams_completion) == 32' docs/descriptor-format.md; \
 	echo 'Documentation checks: PASS'
+
+release-input-check:
+	./scripts/check-release-inputs.py
 
 abi-check:
 	./scripts/gen-vams-abi.py --check
@@ -174,6 +185,10 @@ smoke: firmware
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
 	VAMS_FIRMWARE="$(VAMS_FIRMWARE)" \
 	./qemu/tests/smoke-vams-riscv.sh
+
+qemu-prepare:
+	QEMU_SRC="$(QEMU_SRC)" QEMU_BUILD_DIR="$(QEMU_BUILD_DIR)" \
+		./scripts/prepare-qemu.sh
 
 zephyr-prepare:
 	ZEPHYR_VENV="$(ZEPHYR_VENV)" ./scripts/prepare-zephyr.sh
@@ -296,10 +311,12 @@ payload-throughput-smoke:
 	./qemu/tests/performance/vams-payload-throughput.py
 
 stress-smoke:
+	@mkdir -p build/reports
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/stress/vams-stress-qualification.py \
 		--commands 10000 --resets 32 --payload-samples 16 \
-		--virtual-hours 1
+		--virtual-hours 1 \
+		--json-output build/reports/stress-smoke.json
 
 firmware-resource-report: zephyr
 	@mkdir -p build/reports
@@ -454,7 +471,11 @@ tree:
 	@find . -path './.git' -prune -o -path './build' -prune -o -print | sort
 
 demo:
-	@echo 'The full PCIe accelerator demo is not implemented; see docs/demo.md'
+	QEMU_SYSTEM_RISCV32="$(VAMS_DEMO_QEMU_RISCV32)" \
+	QEMU_SYSTEM_X86_64="$(VAMS_DEMO_QEMU_X86_64)" \
+	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
+	VAMS_DEMO_OUTPUT="$(VAMS_DEMO_OUTPUT)" \
+		./scripts/vams-demo.py
 
 clean:
 	$(MAKE) -C kernel KERNEL_BUILD="$(KERNEL_BUILD)" clean

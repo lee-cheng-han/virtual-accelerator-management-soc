@@ -139,3 +139,10 @@ then requires a clean NOP and a second exactly-once trace.
 `firmware-scheduler-unit` compiles the production EDF comparator as strict host
 C and verifies deadline ordering plus FIFO acceptance-sequence tie-breaking.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
+`release-input-check` cross-validates centralized source pins, the supported
+interface matrix, and the checked-in million-command evidence. CI additionally
+applies every QEMU patch to a clean exact upstream commit; main/manual runs build
+the two virtual targets and archive model, fuzz, fault, and stress results.
+`make demo` composes source checks, the real firmware/PCI bridge, bounded payload
+integrity, deterministic fault recovery, and development stress under explicit
+timeouts with per-stage logs and a machine-readable aggregate report.

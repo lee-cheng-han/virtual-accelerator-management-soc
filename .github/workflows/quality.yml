@@ -3,16 +3,61 @@ name: Quality
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VAMS_BUILD_JOBS: "2"
 
 jobs:
   source-contract:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Verify generated contracts and host-side checks
         run: make check
       - name: Verify source hygiene
         run: make source-check
+
+  qemu-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Fetch pinned QEMU source
+        run: |
+          . tools/versions.env
+          git clone --filter=blob:none --no-checkout https://gitlab.com/qemu-project/qemu.git build/qemu-upstream
+          git -C build/qemu-upstream fetch --depth 1 origin "$VAMS_QEMU_COMMIT"
+          git -C build/qemu-upstream checkout --detach "$VAMS_QEMU_COMMIT"
+      - name: Verify patch series against pinned QEMU
+        run: make qemu-patch-check QEMU_SRC="$PWD/build/qemu-upstream"
+
+  virtual-model:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev
+      - name: Build pinned virtual platform
+        run: make qemu-prepare
+      - name: Run model, fuzz, fault, and stress checks
+        run: |
+          make queue-model-smoke fuzz-smoke fault-injection-smoke stress-smoke \
+            QEMU_SYSTEM_X86_64="$PWD/build/qemu-src/build-vams/qemu-system-x86_64"
+      - name: Archive stress evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: virtual-model-evidence
+          path: build/reports/
+          if-no-files-found: ignore
