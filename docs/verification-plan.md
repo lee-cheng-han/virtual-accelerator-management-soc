@@ -136,6 +136,10 @@ payload integration.
 one-millisecond NOP to expire while queued, checks every asserted ownership
 transition and exactly one firmware publication, verifies the host CQ timeout,
 then requires a clean NOP and a second exactly-once trace.
+`firmware-ownership-smoke` emulates both sides of the private transport. It
+checks management-portal submission/authorization/result/final framing, payload
+result return, firmware-final CQ publication, engine-reset reconciliation, and
+a terminal failure when the bridge disconnects with owned work.
 `firmware-scheduler-unit` compiles the production EDF comparator as strict host
 C and verifies deadline ordering plus FIFO acceptance-sequence tie-breaking.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.

@@ -111,11 +111,12 @@ resetting and wakes blocked submitters when SQ head advances.
 2. It publishes SQ tail with a release barrier and rings `SQ_DOORBELL`.
 3. Hardware notifies firmware; the receiver DMA-fetches one entry.
 4. Firmware validates it, allocates command state, and advances SQ head.
-5. The scheduler dispatches to the DMA/processing engine. The v1 engine is
+5. The scheduler authorizes the DMA/processing engine. The v1 engine is
    single-issue; vector add is element-wise little-endian `uint32_t` addition
    modulo 2^32.
-6. Firmware creates a 32-byte completion. Hardware DMA-writes it, publishes CQ
-   tail, and raises MSI-X if unmasked.
+6. The engine returns a 32-byte result to firmware. Firmware validates identity,
+   performs the terminal transition, and publishes the only host completion.
+   Hardware DMA-writes it, publishes CQ tail, and raises MSI-X if unmasked.
 7. The driver drains CQ, returns cookies/results, advances CQ head, and unmaps
    buffers after device ownership ends.
 

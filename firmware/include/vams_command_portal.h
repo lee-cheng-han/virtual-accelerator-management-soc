@@ -12,5 +12,8 @@ int vams_command_receive(const struct device *dev,
 			 k_timeout_t timeout);
 int vams_command_complete(const struct device *dev,
 			  const struct vams_completion *completion);
+int vams_command_result_receive(const struct device *dev,
+				struct vams_completion *result,
+				k_timeout_t timeout);
 
 #endif /* VAMS_COMMAND_PORTAL_H */

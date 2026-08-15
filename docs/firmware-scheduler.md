@@ -3,12 +3,13 @@
 ## Implemented pipeline
 
 The Zephyr firmware owns a fixed pool of eight command objects. It performs no
-command-path heap allocation. Four preemptible tasks transfer sole ownership
+command-path heap allocation. Five preemptible tasks transfer sole ownership
 through bounded pointer message queues:
 
 ```text
 receiver -> validation queue -> validator -> ready queue
-         -> earliest-deadline scheduler -> completion queue -> publisher
+         -> earliest-deadline scheduler -> running queue -> result task
+         -> completion queue -> publisher
 ```
 
 The receiver reserves a slab object before acknowledging a portal submission,
@@ -18,10 +19,13 @@ validator applies the normative first-error rules and sends invalid work
 directly to `COMPLETED_ERROR`; accepted work enters `QUEUED`.
 
 The scheduler drains all currently ready objects and selects the earliest
-absolute deadline. Acceptance sequence provides a stable FIFO tie-break. One
-engine slot is modeled, so accepted authorization work transitions through
-`RUNNING` to `COMPLETED`. The completion task is the only owner permitted to
-write the firmware portal result and return an object to the slab.
+absolute deadline. Acceptance sequence provides a stable FIFO tie-break. NOP
+work completes locally. For payload work, the scheduler publishes an engine
+authorization and transfers the still-`RUNNING` object to the single-entry
+running queue. The result task acknowledges the modeled engine result,
+validates command ID and cookie, applies the terminal transition, and transfers
+the object to the completion task. The completion task is the only owner
+permitted to publish a terminal host result and return an object to the slab.
 
 ## Executable invariants
 
@@ -72,14 +76,16 @@ The dual-QEMU test requires the complete timeout state trace, exactly one
 firmware publication, `TIMED_OUT/TIMEOUT` in the host CQ, and a clean following
 NOP with its own exactly-once trace.
 
+`make firmware-ownership-smoke` independently exercises result framing,
+firmware-final publication, engine-reset reconciliation, and bridge-disconnect
+terminal recovery without requiring the Zephyr compiler.
+
 ## Remaining recovery boundary
 
-Firmware currently authorizes the hardware-model payload engine and receives
-no running-command result event back from it. Consequently, persisted
-mid-command state, firmware abort acknowledgment, disconnect reconciliation,
-and final DMA telemetry remain future work. The QEMU endpoint independently
-implements engine-only reset with a private epoch, terminal reset completion,
-queued-work preservation, and stale-callback suppression. Queue/device reset
-generation suppression and firmware queued timeout complete the currently
-executable recovery hierarchy without claiming a firmware running-result
-protocol.
+Firmware now owns payload commands through modeled-engine result validation and
+terminal publication. Engine, queue, and device reset results are acknowledged;
+the PCI endpoint discards reset-scope terminal replies after ownership is
+reconciled. A bridge disconnect synthesizes one terminal host failure and
+cancels modeled work. The remaining boundary is a high-priority firmware
+recovery manager with bounded abort deadlines, escalation counters, and
+CQ-backpressure policy.

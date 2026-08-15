@@ -6,15 +6,17 @@ register side effects; the host owns buffer mapping and ring production.
 
 The current firmware captures generated-ABI descriptors into an eight-object
 slab and transfers sole ownership through receiver, validator,
-earliest-deadline scheduler, and completion tasks. It validates every v1 opcode
-in fixed first-error order and publishes an authorization result exactly once.
-The PCI model performs authorized payload work and finalizes byte count and CRC.
+earliest-deadline scheduler, engine-result, and completion tasks. It validates
+every v1 opcode in fixed first-error order, publishes payload authorization,
+validates the returned command ID and cookie, applies the terminal state, and
+publishes the only host-visible result exactly once. The PCI model performs
+authorized payload work and returns byte count, CRC, error, and reset status.
 
 The current PCI model supplies the asynchronous execution boundary after
 firmware authorization. It captures the command deadline and reset generation,
-exposes BUSY, and either runs the payload callback or returns a timeout. This is
-hardware-model execution state; a firmware DMA-result task, running-command
-abort handshake, and recovery manager are not yet implemented.
+exposes BUSY, and returns success, failure, timeout, or reset through the result
+portal. A bounded running-command abort handshake and centralized firmware
+recovery manager remain planned.
 
 ## Boot and steady state
 
@@ -37,24 +39,26 @@ first.
 | Command receiver | preemptible 1 | 1536 B | doorbell semaphore, descriptor DMA completion | Fetch complete descriptors; advance SQ head only after capture. |
 | Validator | preemptible 2 | 2048 B | command-input queue, output capacity | Apply fixed validation order; build rejection or accepted command. |
 | Scheduler | preemptible 3 | 1536 B | ready queue, engine slot | EDF by absolute timeout, FIFO tie-break; dispatch one command. |
-| DMA manager | preemptible 2 | 2048 B | DMA event semaphore/timer | Program, monitor, abort engine; build result event. |
+| Engine result | preemptible 2 | 1536 B | single-entry running queue, result portal | Acknowledge result, validate identity, and apply terminal state. |
 | Completion service | preemptible 2 | 1536 B | result queue, CQ-space semaphore | DMA-write completion, publish CQ tail, request interrupt. |
 | Watchdog service | preemptible 4 | 1024 B | periodic timer | Check task progress epochs and pet hardware watchdog. |
 | Telemetry service | preemptible 5 | 1536 B | periodic timer/snapshot request | Aggregate counters and atomically publish snapshots. |
 | Logging service | preemptible 7 | 1536 B | bounded log queue/UART | Export structured records; drop rather than block producers. |
 
-This adds a completion task to the minimum requested decomposition so CQ
-backpressure cannot block validator or recovery. “DMA manager” owns both DMA and
-the simple processing-engine transaction in release 1.
+Recovery, telemetry, and logging rows describe the target decomposition; the
+current build combines telemetry with watchdog health and uses synchronous UART
+logging. The dedicated result task and completion task keep the validator and
+scheduler out of the terminal publication path.
 
 ## Objects and ownership
 
-Firmware allocates a fixed pool of at most `min(SQ usable capacity, 64)` command
+Firmware allocates a fixed pool of eight command
 objects. Each object has exactly one owning task at a time; transfer through a
 Zephyr `k_msgq` moves ownership. Receiver owns captured bytes, validator owns
-VALIDATING, scheduler owns QUEUED, DMA manager owns RUNNING/ABORTING, and
-completion service owns terminal result publication. Only recovery may freeze
-all owners, using events and acknowledgments rather than taking their locks.
+VALIDATING, scheduler owns QUEUED, the engine-result service owns RUNNING while
+waiting for the portal, and completion service owns terminal result
+publication. The planned recovery manager may freeze all owners using events
+and acknowledgments rather than taking their locks.
 
 | Shared object | Synchronization | Rule |
 |---|---|---|

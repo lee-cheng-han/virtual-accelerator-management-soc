@@ -15,10 +15,11 @@ from pathlib import Path
 RESOURCE_RE = re.compile(
     r"Resources: static_sram=(\d+)/(\d+) pool_high=(\d+)/(\d+) "
     r"validation_high=(\d+)/(\d+) ready_high=(\d+)/(\d+) "
+    r"running_high=(\d+)/(\d+) "
     r"completion_high=(\d+)/(\d+)"
 )
 STACK_RE = re.compile(
-    r"(producer|monitor|mailbox|receiver|validator|scheduler|completion|health)="
+    r"(producer|monitor|mailbox|receiver|validator|scheduler|result|completion|health)="
     r"(\d+)/(\d+)"
 )
 WATCHDOG_RE = re.compile(
@@ -76,7 +77,7 @@ def capture(qemu, firmware):
         "",
     )
     stacks = STACK_RE.findall(stack_line)
-    if resources is None or watchdog is None or len(stacks) != 8:
+    if resources is None or watchdog is None or len(stacks) != 9:
         raise AssertionError("firmware resource transcript is incomplete")
 
     values = resources.groups()
@@ -87,7 +88,8 @@ def capture(qemu, firmware):
         "command_pool": parse_pair("command pool", values[2], values[3]),
         "validation": parse_pair("validation queue", values[4], values[5]),
         "ready": parse_pair("ready queue", values[6], values[7]),
-        "completion": parse_pair("completion queue", values[8], values[9]),
+        "running": parse_pair("running queue", values[8], values[9]),
+        "completion": parse_pair("completion queue", values[10], values[11]),
     }
     stack_report = {
         name: parse_pair(f"{name} stack", used, capacity)

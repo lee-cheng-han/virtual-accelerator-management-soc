@@ -17,11 +17,14 @@
 #define VAMS_COMMAND_STATUS 0x00U
 #define VAMS_COMMAND_FW_ACK 0x08U
 #define VAMS_COMMAND_FW_COMPLETE 0x0cU
+#define VAMS_COMMAND_RESULT_ACK 0x1cU
 #define VAMS_COMMAND_SUBMISSION 0x100U
 #define VAMS_COMMAND_COMPLETION 0x200U
+#define VAMS_COMMAND_RESULT 0x300U
 
 #define VAMS_COMMAND_H2F_PENDING BIT(0)
 #define VAMS_COMMAND_F2H_PENDING BIT(1)
+#define VAMS_COMMAND_RESULT_PENDING BIT(5)
 #define VAMS_COMMAND_WORDS (VAMS_SUBMISSION_SIZE / sizeof(uint32_t))
 #define VAMS_COMPLETION_WORDS (VAMS_COMPLETION_SIZE / sizeof(uint32_t))
 
@@ -80,6 +83,36 @@ int vams_command_complete(const struct device *dev,
 	}
 	barrier_dmem_fence_full();
 	sys_write32(1U, config->base + VAMS_COMMAND_FW_COMPLETE);
+	return 0;
+}
+
+int vams_command_result_receive(const struct device *dev,
+				struct vams_completion *result,
+				k_timeout_t timeout)
+{
+	const struct vams_command_portal_config *config = dev->config;
+	k_timepoint_t deadline = sys_timepoint_calc(timeout);
+	uint32_t words[VAMS_COMPLETION_WORDS];
+
+	if (result == NULL) {
+		return -EINVAL;
+	}
+
+	while ((sys_read32(config->base + VAMS_COMMAND_STATUS) &
+		VAMS_COMMAND_RESULT_PENDING) == 0U) {
+		if (sys_timepoint_expired(deadline)) {
+			return -EAGAIN;
+		}
+		k_sleep(K_MSEC(1));
+	}
+
+	for (size_t index = 0U; index < ARRAY_SIZE(words); index++) {
+		words[index] = sys_read32(config->base + VAMS_COMMAND_RESULT +
+					  index * sizeof(uint32_t));
+	}
+	barrier_dmem_fence_full();
+	memcpy(result, words, sizeof(*result));
+	sys_write32(1U, config->base + VAMS_COMMAND_RESULT_ACK);
 	return 0;
 }
 

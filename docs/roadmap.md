@@ -46,8 +46,10 @@ queued expiry, generation cancellation, exactly-once publication, and clean
 post-timeout recovery. QEMU engine-only reset terminates active work exactly
 once, advances a private epoch without changing host queue generation, preserves
 queued work, and suppresses the cancelled callback. Queue and device recovery
-remain generation-scoped. Firmware running-result acknowledgment and bridge
-disconnect reconciliation remain improvement work. Six debug-gated one-shot
+remain generation-scoped. Firmware now acknowledges and validates running
+results, owns terminal publication, reconciles engine reset, and converts bridge
+disconnect into a terminal failure. Centralized bounded abort escalation remains
+improvement work. Six debug-gated one-shot
 faults now cover forced timeout, CQ-notification suppression, engine hang,
 directional payload DMA failures, and reset after engine activation. Nth-match
 selection, sticky/saturating evidence, a cold-reset-only lock, engine-start and
@@ -58,9 +60,10 @@ The hardware-free qualification now completes one million mixed commands,
 hours of virtual time with no stale or duplicate completion. It publishes
 host-clock latency distributions and machine-readable environment/evidence.
 Firmware resource telemetry now measures linked SRAM, every service stack,
-fixed-pool/queue high-water, and watchdog margin; rebuilding and capturing that
-new firmware image plus establishing a pinned performance baseline remain
-qualification follow-up work. QEMU and Zephyr revisions are now centralized;
+fixed-pool/queue high-water, and watchdog margin. The rebuilt image and loaded
+dual-QEMU workload now have a recorded development baseline; worst-case runs on
+the pinned release compiler remain qualification follow-up work. QEMU and
+Zephyr revisions are now centralized;
 the QEMU patch and resulting source transformations are content verified. CI
 checks source/contracts and clean patch application on every change, while
 main/manual runs build QEMU and execute model, fuzz, fault, and stress suites.
@@ -95,24 +98,25 @@ explicitly planned and are not counted as implemented.
 
 | Improvement | Applied to completed work | Remaining acceptance work |
 |---|---|---|
-| Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool state transitions/exactly-once publication are fail-fast assertions. | Host mapping lifetime and firmware running-result ownership. |
+| Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool transitions, running-result identity validation, and exactly-once publication are fail-fast assertions. | Host mapping lifetime and recovery-manager escalation invariants. |
 | Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
-| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, and completion tasks connected by bounded queues. | DMA-result and recovery-manager tasks, engine event protocol, and CQ-backpressure watermark. |
-| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, and firmware queued deadlines/generation cancellation all have clean recovery commands. | Firmware running abort handshake, bridge disconnect, and escalation counters. |
+| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, engine-result, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. | Recovery-manager task and CQ-backpressure watermark. |
+| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result acknowledgment, and bridge-disconnect terminal reconciliation have executable paths. | Bounded firmware abort acknowledgment and escalation counters. |
 | Chunked DMA | Every payload opcode uses 64 KiB chunks; maximum-transfer copy/CRC, cross-boundary fill/vector, directional errors, guards, and v1 completion reporting are tested. | Persisted cancellation points, Nth-chunk faults, and memory-pressure evidence. |
 | Deterministic faults | Six debug-gated PCI faults provide one-shot/Nth-match timeout, IRQ, hang, DMA-read, DMA-write, and active-reset injection; two named checkpoints, evidence persistence, lockout, recovery, and post-fault commands are tested. | Firmware-task hang, mailbox corruption, Nth-chunk failure, and additional ordering checkpoints. |
 | Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
 | Memory-order verification | Queue transport documents host/device ownership and QEMU DMA ordering; model and integration tests exercise the normal publication chain. | Independently delayed release/acquire checkpoints from descriptor write through CQ visibility, interrupt, and host consumption. |
 | Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
-| Stress/performance | Queue model plus deterministic qualification cover one million mixed commands, 1,000 resets, queue wrap/high-water, 24 virtual hours, integrity, liveness, and host-clock latency distributions. Firmware emits stack/SRAM/pool/queue/watchdog resource evidence. | Capture loaded firmware resource measurements on the rebuilt image, establish a pinned-runner baseline, and add concurrent-process, process-exit, memory-pressure, and extended-fault qualification. |
+| Stress/performance | Queue model plus deterministic qualification cover one million mixed commands, 1,000 resets, queue wrap/high-water, 24 virtual hours, integrity, liveness, and host-clock latency distributions. The rebuilt firmware passed the 39-firmware/37-host dual-QEMU suite and recorded 52,900/524,288 bytes SRAM, 749 ms watchdog margin, all nine task stack margins, and loaded pool/queue high-water values. | Establish a pinned-runner baseline and add worst-case concurrent-process, process-exit, memory-pressure, recovery, and extended-fault qualification. |
 | Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; debug faults are property-gated, absent from production capabilities, and lockable until cold reset. | DMA-aperture enforcement, per-process buffer ownership, privilege checks, hostile-parser coverage, and reset/removal isolation tests. |
 | Requirement traceability | Generated ABI artifacts and normative documents define the current cross-layer contract. | Stable requirement IDs linked to design, implementation, test, CI evidence, and explicit limitation in a generated compliance matrix. |
-| Reproducible CI and demo | Central pins, QEMU patch/source hashes, compatibility data, release-evidence validation, clean patch CI, main/manual virtual regressions, and an offline one-command firmware/payload/fault/stress demo with archived JSON/logs are implemented. | Hash-locked compiler/guest artifacts, sanitizer/static-analysis/coverage jobs, unified traces, public payload UAPI, and composition of the Linux guest test into the demo. |
+| Reproducible CI and demo | Central pins, QEMU patch/source hashes, compatibility data, release-evidence validation, clean patch CI, main/manual virtual regressions, and an offline one-command firmware/payload/fault/stress demo with archived JSON/logs are implemented. Ubuntu's RISC-V GCC 14.2.0 successfully performs development rebuilds. | Acquire and hash-lock the pinned GCC 13.4.0 release toolchain and guest artifacts; add sanitizer/static-analysis/coverage jobs, unified traces, public payload UAPI, and the Linux guest test to the demo. |
 
 ### Near-term implementation order
 
-1. Complete the firmware-to-engine running-result, abort/acknowledgment,
-   disconnect-reconciliation, and bounded recovery-escalation protocol.
+1. Add the centralized firmware recovery manager, bounded running abort
+   acknowledgment, escalation counters, and CQ-backpressure policy on top of
+   the implemented engine-result and disconnect-reconciliation protocol.
 2. Extend the Linux API with registered payload mappings, asynchronous
    submit/wait, `poll`/`epoll`, per-process ownership, and safe close/remove
    cancellation; enforce DMA apertures and privilege boundaries at the same
@@ -122,7 +126,8 @@ explicitly planned and are not counted as implemented.
    userspace.
 4. Extend the million-command/reset/endurance qualification with
    concurrent-process, process-exit, memory-pressure, and long-duration
-   watchdog runs while collecting loaded resource and recovery evidence.
+   watchdog runs while collecting worst-case recovery evidence and enforcing
+   regression floors against the new rebuilt-image resource baseline.
 5. Finish hash-locking the build matrix, enable sanitizers/static analysis and
    coverage-guided fuzzing, generate the requirements-to-evidence matrix, and
    compose the reproducible Linux guest/public UAPI into the existing
@@ -138,11 +143,12 @@ reproducibility. Every required gate remains hardware-free.
 
 ### Work package A — Firmware command and recovery ownership
 
-- Add a firmware DMA-result task and an explicit request/result event protocol
-  between the scheduler, modeled engine, and completion service.
-- Add running-command abort request/acknowledgment, bounded reset acknowledgment,
-  result acknowledgment, bridge-disconnect reconciliation, and exactly-once
-  terminal publication.
+Implemented foundation: the engine-result task, result acknowledgment window,
+identity validation, firmware-owned terminal transition/publication, reset
+result reconciliation, and disconnect terminal completion are in place.
+
+- Add a bounded running-command abort request/acknowledgment and explicit reset
+  acknowledgment deadlines around the implemented result protocol.
 - Add one high-priority recovery manager that serializes engine, queue, device,
   watchdog, and bridge recovery and owns generation changes and escalation
   counters.
@@ -156,6 +162,15 @@ lost or duplicate result, and clean progress after engine timeout, queue reset,
 device reset, watchdog reset, CQ saturation, and bridge disconnect.
 
 ### Work package B — Firmware resource, health, and crash engineering
+
+Development baseline captured on the rebuilt GCC 14.2.0 image: the complete
+dual-QEMU suite passed 39 firmware-visible and 37 host-visible commands. Linked
+SRAM is 52,900/524,288 bytes; peak command pool use is 2/8; validation, ready,
+running, and completion queues peak at 1/8, 1/8, 1/1, and 1/8; the watchdog
+margin is 749 ms. Peak task stack use is producer 184/1024, monitor 364/1024,
+mailbox 220/1024, receiver 364/1536, validator 320/2048, scheduler 476/1536,
+engine-result 384/1536, completion 444/1536, and health 432/1024 bytes. This is
+a development baseline, not yet the pinned-runner worst-case acceptance record.
 
 - Run worst-case command, fault, overload, and recovery workloads; capture all
   task, ISR, main, and idle stack high-water values; justify each configured

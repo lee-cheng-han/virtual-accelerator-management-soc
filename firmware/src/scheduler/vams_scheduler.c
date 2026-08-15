@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
@@ -83,6 +84,28 @@ void vams_scheduler_cancel(struct vams_command_object *command,
 	command->completion.device_timestamp = sys_cpu_to_le64(timestamp_ms);
 	vams_scheduler_transition(command, VAMS_COMMAND_QUEUED,
 				  VAMS_COMMAND_CANCELLED);
+}
+
+int vams_scheduler_apply_result(struct vams_command_object *command,
+				const struct vams_completion *result)
+{
+	uint16_t status;
+
+	__ASSERT_NO_MSG(command != NULL);
+	__ASSERT_NO_MSG(result != NULL);
+	__ASSERT_NO_MSG(command->state == VAMS_COMMAND_RUNNING);
+	if (result->command_id != command->submission.command_id ||
+	    result->user_cookie != command->submission.user_cookie) {
+		return -EPROTO;
+	}
+
+	command->completion = *result;
+	status = sys_le16_to_cpu(result->status);
+	vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
+				  status == VAMS_STATUS_SUCCESS ?
+				  VAMS_COMMAND_COMPLETED :
+				  VAMS_COMMAND_COMPLETED_ERROR);
+	return 0;
 }
 
 void vams_scheduler_mark_published(struct vams_command_object *command)

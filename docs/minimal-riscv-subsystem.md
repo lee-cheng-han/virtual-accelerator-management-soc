@@ -100,6 +100,8 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0015-hw-misc-add-vams-deterministic-fault-controls.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"
 ```
 
 Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both

@@ -49,19 +49,25 @@ behind the PCI queue front end.
 | `0x10` | `HOST_ACK` | WO | Write `1` after capturing the completion |
 | `0x14` | `SUBMIT_COUNT` | RO | Saturating accepted-submission count |
 | `0x18` | `COMPLETE_COUNT` | RO | Saturating published-completion count |
+| `0x1c` | `RESULT_ACK` | WO | Write `1` after capturing an engine result |
+| `0x20` | `RESULT_COUNT` | RO | Saturating accepted-engine-result count |
 | `0x100–0x13c` | `SUBMISSION[0..15]` | RW | 64-byte descriptor staging window |
 | `0x200–0x21c` | `COMPLETION[0..7]` | RW | 32-byte completion staging window |
+| `0x300–0x31c` | `RESULT[0..7]` | RO | 32-byte modeled-engine result window |
 
 `STATUS` bit 0 is host-to-firmware pending, bit 1 firmware-to-host pending,
-bits 2 and 3 report attempted overwrite of the respective staging window, and
-bit 4 reports an invalid ownership transition. Firmware captures all descriptor
+bits 2 and 3 report attempted overwrite of the respective staging window, bit
+4 reports an invalid ownership transition, and bit 5 reports a pending engine
+result. Firmware captures all descriptor
 words, executes a full memory fence, and only then acknowledges bit 0. It fills
 all completion words, executes a full fence, and only then publishes bit 1.
 Overwrite and protocol bits are sticky W1C diagnostics.
 
 The Zephyr command task polls for bit 0 and validates NOP or any v1 payload
-opcode using the normative first-error order, then publishes a result with the
-original ID and cookie. The `vams-mgmt.test-command` property injects a valid
+opcode using the normative first-error order. Payload authorization causes the
+portal to accept one engine result; the result task acknowledges bit 5,
+validates ID and cookie, and publishes the terminal completion. The
+`vams-mgmt.test-command` property injects a valid
 NOP with value `1` or an
 unsupported-version NOP with value `2` at cold boot. This is deterministic test
 injection only. The optional `command-chardev` property now drives the same
@@ -124,10 +130,10 @@ and unsupported-version completions from Zephyr.
 - The mailbox and polling UART share the hart's direct machine-external input;
   a PLIC is deferred until the PCIe interrupt topology needs it.
 - There is one four-entry mailbox receive queue and one outstanding response.
-- The command portal holds one descriptor and completion; it is intentionally
-  polling-only until it is connected to the PCI queue event fabric.
+- The command portal holds one descriptor, engine result, and completion; it is
+  intentionally polling-only.
 - Telemetry reads are individually atomic 32-bit operations; the split uptime
   value does not yet provide a multiword snapshot protocol.
-- Portal state is migration version 2 while version-1 management snapshots
-  remain loadable with an empty portal. End-to-end live migration is not yet an
+- Portal state is migration version 4 while earlier management snapshots remain
+  loadable with empty result state. End-to-end live migration is not yet an
   accepted or tested platform capability.

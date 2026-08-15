@@ -845,9 +845,9 @@ def main():
                 "cookie=0x4000000000000004",
                 "Command: id=0xc0dec005 status=1 error=9 "
                 "cookie=0x5000000000000005",
-                "Command: id=0xc0dec006 status=0 error=0 "
+                "Command: id=0xc0dec006 status=2 error=16 "
                 "cookie=0x6000000000000006",
-                "Command: id=0xc0dec007 status=0 error=0 "
+                "Command: id=0xc0dec007 status=2 error=17 "
                 "cookie=0x7000000000000007",
                 "Command: id=0xf1110001 status=0 error=0 "
                 "cookie=0x8a7b6c5d4e3f2011",
@@ -857,15 +857,15 @@ def main():
                 "cookie=0xa00000000000000a",
                 "Command: id=0xf1110004 status=1 error=9 "
                 "cookie=0xb00000000000000b",
-                "Command: id=0xf1110005 status=0 error=0 "
+                "Command: id=0xf1110005 status=2 error=16 "
                 "cookie=0xc00000000000000c",
-                "Command: id=0xf1110006 status=0 error=0 "
+                "Command: id=0xf1110006 status=2 error=17 "
                 "cookie=0xd00000000000000d",
                 "Command: id=0xcc320001 status=0 error=0 "
                 "cookie=0xe00000000000000e",
                 "Command: id=0xcc320002 status=0 error=0 "
                 "cookie=0xf00000000000000f",
-                "Command: id=0xcc320003 status=0 error=0 "
+                "Command: id=0xcc320003 status=2 error=20 "
                 "cookie=0x0100000000000010",
                 "Command: id=0xcc320004 status=1 error=3 "
                 "cookie=0x0200000000000011",
@@ -877,7 +877,7 @@ def main():
                 "cookie=0x0500000000000014",
                 "Command: id=0xcc320008 status=1 error=8 "
                 "cookie=0x0600000000000015",
-                "Command: id=0xcc320009 status=0 error=0 "
+                "Command: id=0xcc320009 status=2 error=16 "
                 "cookie=0x0700000000000016",
                 "Command: id=0xadd40001 status=0 error=0 "
                 "cookie=0x0800000000000017",
@@ -891,17 +891,17 @@ def main():
                 "cookie=0x0c0000000000001b",
                 "Command: id=0xadd40006 status=1 error=9 "
                 "cookie=0x0d0000000000001c",
-                "Command: id=0xadd40007 status=0 error=0 "
+                "Command: id=0xadd40007 status=2 error=16 "
                 "cookie=0x0e0000000000001d",
-                "Command: id=0xadd40008 status=0 error=0 "
+                "Command: id=0xadd40008 status=2 error=16 "
                 "cookie=0x0f0000000000001e",
-                "Command: id=0xa51c0001 status=0 error=0 "
+                "Command: id=0xa51c0001 status=3 error=19 "
                 "cookie=0x100000000000001f",
-                "Command: id=0xa51c0002 status=0 error=0 "
+                "Command: id=0xa51c0002 status=5 error=22 "
                 "cookie=0x1100000000000020",
                 "Command: id=0xa51c0003 status=0 error=0 "
                 "cookie=0x1200000000000021",
-                "Command: id=0xa51c0004 status=0 error=0 "
+                "Command: id=0xa51c0004 status=5 error=21 "
                 "cookie=0x1300000000000022",
                 "Command: id=0xa51c0005 status=0 error=0 "
                 "cookie=0x1400000000000023",

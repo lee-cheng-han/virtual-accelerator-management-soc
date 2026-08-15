@@ -23,7 +23,9 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > Every payload operation uses a bounded 64 KiB DMA working chunk, including
 > streaming CRC state and a full 16 MiB copy/integrity throughput smoke.
 > Zephyr now schedules fixed-pool command objects through receiver, validator,
-> earliest-deadline scheduler, and exactly-once completion tasks.
+> earliest-deadline scheduler, engine-result, and exactly-once completion tasks;
+> payload byte counts, CRCs, reset outcomes, and identity return to firmware
+> before the only host-visible completion is published.
 > Engine-only reset now terminates active work with a reset completion, advances
 > a private engine epoch, preserves queued work, and suppresses stale callbacks.
 > A property-gated debug block now injects six one-shot PCI faults, selects an

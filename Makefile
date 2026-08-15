@@ -62,6 +62,7 @@ VAMS_DEMO_OUTPUT ?=
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
 	fault-injection-smoke \
+	firmware-ownership-smoke \
 	payload-throughput-smoke \
 	stress-smoke firmware-resource-report stress-qualification \
 	dma-engine-smoke \
@@ -110,6 +111,8 @@ help:
 	  '                   Verify firmware queued timeout and clean recovery' \
 	  '  make fault-injection-smoke' \
 	  '                   Verify debug faults, checkpoints, and recovery' \
+	  '  make firmware-ownership-smoke' \
+	  '                   Verify result ownership, reset, and disconnect' \
 	  '  make payload-throughput-smoke' \
 	  '                   Verify bounded DMA and report virtual throughput' \
 	  '  make stress-smoke Run a short queue/reset/endurance qualification' \
@@ -306,6 +309,12 @@ fault-injection-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/fault/vams-fault-injection.py
 
+firmware-ownership-smoke:
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
+	./qemu/tests/qtest/vams-firmware-ownership.py
+
 payload-throughput-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/performance/vams-payload-throughput.py
@@ -465,6 +474,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0014-hw-misc-add-vams-engine-recovery-controls.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0015-hw-misc-add-vams-deterministic-fault-controls.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0015-hw-misc-add-vams-deterministic-fault-controls.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

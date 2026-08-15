@@ -53,6 +53,8 @@ void vams_scheduler_timeout(struct vams_command_object *command,
 			    uint64_t timestamp_ms);
 void vams_scheduler_cancel(struct vams_command_object *command,
 			   uint64_t timestamp_ms);
+int vams_scheduler_apply_result(struct vams_command_object *command,
+				const struct vams_completion *result);
 void vams_scheduler_mark_published(struct vams_command_object *command);
 
 #endif /* VAMS_SCHEDULER_H */
