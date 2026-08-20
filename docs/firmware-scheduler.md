@@ -8,7 +8,7 @@ through bounded pointer message queues:
 
 ```text
 receiver -> validation queue -> validator -> ready queue
-         -> earliest-deadline scheduler -> running queue -> result task
+         -> earliest-deadline scheduler -> running queue -> recovery manager
          -> completion queue -> publisher
 ```
 
@@ -22,7 +22,7 @@ The scheduler drains all currently ready objects and selects the earliest
 absolute deadline. Acceptance sequence provides a stable FIFO tie-break. NOP
 work completes locally. For payload work, the scheduler publishes an engine
 authorization and transfers the still-`RUNNING` object to the single-entry
-running queue. The result task acknowledges the modeled engine result,
+running queue. The recovery manager acknowledges the modeled engine result,
 validates command ID and cookie, applies the terminal transition, and transfers
 the object to the completion task. The completion task is the only owner
 permitted to publish a terminal host result and return an object to the slab.
@@ -61,6 +61,14 @@ immediately before dispatch. Expired queued work follows
 `TIMED_OUT/TIMEOUT` without authorizing QEMU payload access. A generation
 mismatch becomes `CANCELLED` with `RESET/RESET`.
 
+For running payload work, the recovery manager waits only until the absolute
+command deadline. Expiry follows `RUNNING -> ABORTING`, publishes an explicit
+`TIMED_OUT/TIMEOUT` abort request, and waits at most 100 ms for the engine
+result. A valid acknowledgment completes with the returned terminal status. A
+missing or mismatched acknowledgment increments a saturating escalation counter
+and completes `FAILED/ENGINE`; neither path can retain the command object
+indefinitely.
+
 The test-only `CONFIG_VAMS_SCHEDULER_TEST_DELAY_MS` defaults to zero and is not
 a host-visible capability. Its isolated build delays scheduler dispatch long
 enough to exercise expiry deterministically.
@@ -76,9 +84,9 @@ The dual-QEMU test requires the complete timeout state trace, exactly one
 firmware publication, `TIMED_OUT/TIMEOUT` in the host CQ, and a clean following
 NOP with its own exactly-once trace.
 
-`make firmware-ownership-smoke` independently exercises result framing,
-firmware-final publication, engine-reset reconciliation, and bridge-disconnect
-terminal recovery without requiring the Zephyr compiler.
+`make firmware-ownership-smoke` independently exercises result and abort
+framing, firmware-final publication, engine-reset reconciliation, and
+bridge-disconnect terminal recovery without requiring the Zephyr compiler.
 
 ## Remaining recovery boundary
 
@@ -86,6 +94,6 @@ Firmware now owns payload commands through modeled-engine result validation and
 terminal publication. Engine, queue, and device reset results are acknowledged;
 the PCI endpoint discards reset-scope terminal replies after ownership is
 reconciled. A bridge disconnect synthesizes one terminal host failure and
-cancels modeled work. The remaining boundary is a high-priority firmware
-recovery manager with bounded abort deadlines, escalation counters, and
-CQ-backpressure policy.
+cancels modeled work. The high-priority recovery manager now owns bounded
+running abort and escalation. The remaining boundary is serialization of every
+reset/watchdog scope plus a CQ-backpressure and overload policy.

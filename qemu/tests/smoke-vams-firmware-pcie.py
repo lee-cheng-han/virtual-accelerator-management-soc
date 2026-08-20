@@ -254,6 +254,7 @@ def main():
                     "-chardev",
                     f"socket,id=command,path={command_socket},server=on,wait=off",
                     "-global", "vams-mgmt.command-chardev=command",
+                    "-global", "vams-mgmt.x-drop-abort-result=on",
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=firmware_log,
@@ -262,7 +263,10 @@ def main():
             qtest = None
             try:
                 wait_for_path(command_socket, management)
-                qtest = QTest(x86_qemu, command_socket, pcie_log)
+                qtest = QTest(
+                    x86_qemu, command_socket, pcie_log,
+                    device_options="x-vams-debug=on",
+                )
                 configure_queues(qtest)
 
                 first_cookie = 0x1122334455667788
@@ -701,7 +705,7 @@ def main():
                 wait_for_completion(qtest, 0)
                 check_completion(
                     qtest, 15,
-                    (0xA51C0001, 3, 19, 0, 0, timeout_cookie),
+                    (0xA51C0001, 2, 18, 0, 0, timeout_cookie),
                 )
                 if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
                         timeout_destination:
@@ -808,6 +812,47 @@ def main():
                 if qtest.read32(BAR0 + 0x210) != 3:
                     raise AssertionError("stale engine callback published CQ")
                 qtest.write32(BAR0 + 0x214, 3)
+
+                abort_destination = bytes([0x8D]) * ASYNC_LENGTH
+                abort_cookie = 0x1500000000000024
+                qtest.write(ASYNC_DESTINATION, abort_destination)
+                qtest.write32(BAR0 + 0xF04, 0)
+                qtest.write32(BAR0 + 0xF00, 1 << 2)
+                qtest.write(
+                    SQ_BASE + 3 * SUBMISSION.size,
+                    submission(
+                        1, 0xA51C0006, abort_cookie, opcode=1,
+                        source=ASYNC_SOURCE,
+                        destination=ASYNC_DESTINATION,
+                        length=ASYNC_LENGTH,
+                        timeout_ms=20,
+                    ),
+                )
+                qtest.write32(BAR0 + 0x114, 4)
+                wait_for_completion(qtest, 4)
+                check_completion(
+                    qtest, 3,
+                    (0xA51C0006, 3, 19, 0, 0, abort_cookie),
+                )
+                if qtest.read32(BAR0 + 0x500) & 1:
+                    raise AssertionError("firmware abort left engine busy")
+                if qtest.read(ASYNC_DESTINATION, ASYNC_LENGTH) != \
+                        abort_destination:
+                    raise AssertionError("aborted engine touched payload")
+                qtest.write32(BAR0 + 0x214, 4)
+
+                post_abort_cookie = 0x1600000000000025
+                qtest.write(
+                    SQ_BASE + 4 * SUBMISSION.size,
+                    submission(1, 0xA51C0007, post_abort_cookie),
+                )
+                qtest.write32(BAR0 + 0x114, 5)
+                wait_for_completion(qtest, 5)
+                check_completion(
+                    qtest, 4,
+                    (0xA51C0007, 0, 0, 0, 0, post_abort_cookie),
+                )
+                qtest.write32(BAR0 + 0x214, 5)
             except Exception as error:
                 print(f"firmware PCI bridge test failed: {error}", file=sys.stderr)
                 return_code = 1
@@ -895,7 +940,7 @@ def main():
                 "cookie=0x0e0000000000001d",
                 "Command: id=0xadd40008 status=2 error=16 "
                 "cookie=0x0f0000000000001e",
-                "Command: id=0xa51c0001 status=3 error=19 "
+                "Command: id=0xa51c0001 status=2 error=18 "
                 "cookie=0x100000000000001f",
                 "Command: id=0xa51c0002 status=5 error=22 "
                 "cookie=0x1100000000000020",
@@ -905,6 +950,12 @@ def main():
                 "cookie=0x1300000000000022",
                 "Command: id=0xa51c0005 status=0 error=0 "
                 "cookie=0x1400000000000023",
+                "Command: id=0xa51c0006 status=3 error=19 "
+                "cookie=0x1500000000000024",
+                "Command: id=0xa51c0007 status=0 error=0 "
+                "cookie=0x1600000000000025",
+                "Recovery: event=abort-escalated command=0xa51c0001 count=1",
+                "Recovery: event=abort-request command=0xa51c0006 attempt=2",
             )
             if not all(line in command_output for line in required):
                 print(firmware_output, file=sys.stderr)
@@ -921,8 +972,8 @@ def main():
           "data=PASS validation=PASS DMA-errors=PASS")
     print("VAMS async engine: deadline=PASS reset-cancel=PASS recovery=PASS")
     print("VAMS engine recovery: epoch=PASS queued-preservation=PASS "
-          "stale-callback=PASS")
-    print("VAMS PCI DMA to Zephyr command bridge: firmware=39 host=37 PASS")
+          "firmware-abort=PASS stale-callback=PASS")
+    print("VAMS PCI DMA to Zephyr command bridge: firmware=41 host=39 PASS")
     return 0
 
 

@@ -1,0 +1,316 @@
+Subject: [PATCH] hw/misc: add bounded VAMS firmware abort
+
+Add a firmware-to-engine abort request to the private command portal. Accept
+the control message while payload execution is active, cancel the engine
+without a stale callback, and return a terminal result for firmware-owned
+publication. Preserve abort state across migration and provide a test-only
+one-shot dropped result for escalation coverage.
+
+---
+diff --git a/hw/misc/vams_mgmt.c b/hw/misc/vams_mgmt.c
+--- a/hw/misc/vams_mgmt.c
++++ b/hw/misc/vams_mgmt.c
+@@ -35,6 +35,8 @@
+     VAMS_COMMAND_COMPLETE_COUNT = 0x18,
+     VAMS_COMMAND_RESULT_ACK = 0x1c,
+     VAMS_COMMAND_RESULT_COUNT = 0x20,
++    VAMS_COMMAND_FW_ABORT = 0x24,
++    VAMS_COMMAND_ABORT_COUNT = 0x28,
+     VAMS_COMMAND_SUBMISSION = 0x100,
+     VAMS_COMMAND_COMPLETION = 0x200,
+     VAMS_COMMAND_RESULT = 0x300,
+@@ -120,11 +122,14 @@
+     uint32_t command_submit_count;
+     uint32_t command_complete_count;
+     uint32_t command_result_count;
++    uint32_t command_abort_count;
+     uint32_t test_command;
+     CharFrontend command_chr;
+     uint8_t command_rx[VAMS_SUBMISSION_SIZE];
+     uint32_t command_rx_pos;
+     bool command_result_expected;
++    bool command_abort_result_pending;
++    bool x_drop_abort_result;
+     bool warm_reset_pending;
+ };
+ 
+@@ -169,6 +174,7 @@
+     memset(s->command_result, 0, sizeof(s->command_result));
+     s->command_rx_pos = 0;
+     s->command_result_expected = false;
++    s->command_abort_result_pending = false;
+     vams_mailbox_update_irq(s);
+     vams_watchdog_reload(s);
+     s->warm_reset_pending = true;
+@@ -205,6 +211,8 @@
+         return s->command_complete_count;
+     case VAMS_COMMAND_RESULT_COUNT:
+         return s->command_result_count;
++    case VAMS_COMMAND_ABORT_COUNT:
++        return s->command_abort_count;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       TYPE_VAMS_MGMT ": invalid command read at 0x%"
+@@ -249,8 +257,15 @@
+     }
+ 
+     if (s->command_result_expected) {
++        if (s->command_abort_result_pending && s->x_drop_abort_result) {
++            s->command_rx_pos = 0;
++            s->command_abort_result_pending = false;
++            s->x_drop_abort_result = false;
++            return;
++        }
+         memcpy(s->command_result, s->command_rx, VAMS_COMPLETION_SIZE);
+         s->command_rx_pos = 0;
++        s->command_abort_result_pending = false;
+         s->command_status |= VAMS_COMMAND_RESULT_PENDING;
+         s->command_result_count = vams_sat_inc(s->command_result_count);
+         return;
+@@ -349,6 +364,24 @@
+         }
+         s->command_status &= ~VAMS_COMMAND_RESULT_PENDING;
+         return;
++    case VAMS_COMMAND_FW_ABORT:
++        if (value32 != 1 || !s->command_result_expected ||
++            (s->command_status & VAMS_COMMAND_RESULT_PENDING)) {
++            vams_command_bad_write(s);
++            return;
++        }
++        s->command_abort_count = vams_sat_inc(s->command_abort_count);
++        s->command_abort_result_pending = true;
++        if (!qemu_chr_fe_backend_connected(&s->command_chr) ||
++            qemu_chr_fe_write_all(
++                &s->command_chr, (uint8_t *)s->command_completion,
++                VAMS_COMPLETION_SIZE) != VAMS_COMPLETION_SIZE) {
++            s->command_abort_result_pending = false;
++            s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++            return;
++        }
++        qemu_chr_fe_accept_input(&s->command_chr);
++        return;
+     case VAMS_COMMAND_HOST_ACK:
+         if (value32 != 1 ||
+             !(s->command_status & VAMS_COMMAND_F2H_PENDING)) {
+@@ -595,13 +628,17 @@
+         s->command_result_expected = false;
+         s->command_status &= ~VAMS_COMMAND_RESULT_PENDING;
+     }
++    if (version_id < 5) {
++        s->command_abort_count = 0;
++        s->command_abort_result_pending = false;
++    }
+     vams_mailbox_update_irq(s);
+     return 0;
+ }
+ 
+ static const VMStateDescription vams_mgmt_vmstate = {
+     .name = TYPE_VAMS_MGMT,
+-    .version_id = 4,
++    .version_id = 5,
+     .minimum_version_id = 1,
+     .post_load = vams_mgmt_post_load,
+     .fields = (const VMStateField[]) {
+@@ -634,6 +671,9 @@
+                                VAMS_COMPLETION_WORDS, 4),
+         VMSTATE_UINT32_V(command_result_count, VamsMgmtState, 4),
+         VMSTATE_BOOL_V(command_result_expected, VamsMgmtState, 4),
++        VMSTATE_UINT32_V(command_abort_count, VamsMgmtState, 5),
++        VMSTATE_BOOL_V(command_abort_result_pending, VamsMgmtState, 5),
++        VMSTATE_BOOL_V(x_drop_abort_result, VamsMgmtState, 5),
+         VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
+         VMSTATE_END_OF_LIST()
+     },
+@@ -672,8 +712,10 @@
+     s->command_submit_count = 0;
+     s->command_complete_count = 0;
+     s->command_result_count = 0;
++    s->command_abort_count = 0;
+     s->command_rx_pos = 0;
+     s->command_result_expected = false;
++    s->command_abort_result_pending = false;
+     if (s->test_command) {
+         s->command_submission[0] = s->test_command == 2 ? 2 :
+                                    VAMS_DESC_VERSION_1;
+@@ -715,6 +757,8 @@
+     DEFINE_PROP_UINT32("test-message", VamsMgmtState, test_message, 0),
+     DEFINE_PROP_UINT32("test-command", VamsMgmtState, test_command, 0),
+     DEFINE_PROP_CHR("command-chardev", VamsMgmtState, command_chr),
++    DEFINE_PROP_BOOL("x-drop-abort-result", VamsMgmtState,
++                     x_drop_abort_result, false),
+ };
+ 
+ static void vams_mgmt_init(Object *obj)
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -179,7 +179,9 @@
+         uint8_t bytes[VAMS_SUBMISSION_SIZE];
+     } bridge_submission;
+     uint8_t bridge_completion[VAMS_COMPLETION_SIZE];
++    uint8_t bridge_control[VAMS_COMPLETION_SIZE];
+     uint32_t bridge_completion_pos;
++    uint32_t bridge_control_pos;
+     bool bridge_inflight;
+     bool bridge_waiting_final;
+     bool bridge_discard_completion;
+@@ -250,6 +252,7 @@
+     g_assert(!(s->bridge_inflight && s->engine_inflight));
+     g_assert(!(s->bridge_discard_completion && s->engine_inflight));
+     g_assert(!s->bridge_waiting_final || s->bridge_inflight);
++    g_assert(s->bridge_control_pos <= VAMS_COMPLETION_SIZE);
+     g_assert(!!(s->device_status & VAMS_STATUS_ENGINE_BUSY) ==
+              s->engine_inflight);
+     if (s->engine_inflight) {
+@@ -377,6 +380,7 @@
+     timer_del(s->engine_timer);
+     s->engine_inflight = false;
+     s->engine_hung = false;
++    s->bridge_control_pos = 0;
+     s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     vams_pcie_check_invariants(s);
+@@ -784,6 +788,7 @@
+     g_assert(s->engine_inflight);
+     s->engine_inflight = false;
+     s->engine_hung = false;
++    s->bridge_control_pos = 0;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     vams_pcie_check_invariants(s);
+ 
+@@ -819,7 +824,6 @@
+         return;
+     }
+     if (!vams_pcie_report_engine_result(s, completion, false)) {
+-        vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
+         vams_pcie_publish_completion(s, completion);
+         return;
+     }
+@@ -854,6 +858,7 @@
+     if (vams_pcie_fault_trigger(s, VAMS_FAULT_RESET_ACTIVE)) {
+         vams_pcie_queue_reset(s);
+     }
++    qemu_chr_fe_accept_input(&s->command_chr);
+ }
+ 
+ static void vams_pcie_engine_reset(VamsPcieState *s)
+@@ -865,6 +870,7 @@
+     timer_del(s->engine_timer);
+     s->engine_inflight = false;
+     s->engine_hung = false;
++    s->bridge_control_pos = 0;
+     s->checkpoint_status = VAMS_CHECKPOINT_NONE;
+     s->device_status &= ~VAMS_STATUS_ENGINE_BUSY;
+     s->engine_epoch++;
+@@ -878,7 +884,6 @@
+         completion->device_timestamp = cpu_to_le64(
+             qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+         if (!vams_pcie_report_engine_result(s, completion, false)) {
+-            vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
+             vams_pcie_publish_completion(s, completion);
+             return;
+         }
+@@ -912,7 +917,6 @@
+             return;
+         }
+         if (!vams_pcie_report_engine_result(s, completion, false)) {
+-            vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
+             vams_pcie_publish_completion(s, completion);
+             return;
+         }
+@@ -924,6 +928,9 @@
+ {
+     VamsPcieState *s = opaque;
+ 
++    if (s->engine_inflight) {
++        return VAMS_COMPLETION_SIZE - s->bridge_control_pos;
++    }
+     if (!s->bridge_inflight && !s->bridge_discard_completion) {
+         return 0;
+     }
+@@ -937,6 +944,49 @@
+     bool waiting_final;
+ 
+     vams_pcie_check_invariants(s);
++    if (s->engine_inflight) {
++        struct vams_completion *completion =
++            (struct vams_completion *)s->bridge_completion;
++        const struct vams_completion *request;
++        bool valid;
++
++        g_assert(size <= VAMS_COMPLETION_SIZE - s->bridge_control_pos);
++        memcpy(s->bridge_control + s->bridge_control_pos, buf, size);
++        s->bridge_control_pos += size;
++        if (s->bridge_control_pos != VAMS_COMPLETION_SIZE) {
++            return;
++        }
++        request = (const struct vams_completion *)s->bridge_control;
++        valid = request->command_id ==
++                    s->bridge_submission.command.command_id &&
++                request->user_cookie ==
++                    s->bridge_submission.command.user_cookie &&
++                le16_to_cpu(request->status) == VAMS_STATUS_TIMED_OUT &&
++                le16_to_cpu(request->error_code) == VAMS_ERR_TIMEOUT;
++        vams_pcie_cancel_engine(s);
++        s->engine_epoch++;
++        if (valid) {
++            *completion = *request;
++            s->engine_error |= VAMS_ENGINE_ERROR_TIMEOUT;
++        } else {
++            completion->command_id =
++                s->bridge_submission.command.command_id;
++            completion->status = cpu_to_le16(VAMS_STATUS_FAILED);
++            completion->error_code = cpu_to_le16(VAMS_ERR_ENGINE);
++            completion->bytes_processed = 0;
++            completion->result_crc = 0;
++            completion->user_cookie =
++                s->bridge_submission.command.user_cookie;
++            vams_pcie_set_error(s, VAMS_ERROR_QUEUE);
++        }
++        completion->device_timestamp = cpu_to_le64(
++            qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
++        if (!vams_pcie_report_engine_result(s, completion, false)) {
++            vams_pcie_complete_dma_error(completion, VAMS_ERR_ENGINE);
++            vams_pcie_publish_completion(s, completion);
++        }
++        return;
++    }
+     g_assert(s->bridge_inflight || s->bridge_discard_completion);
+     g_assert(size <= VAMS_COMPLETION_SIZE - s->bridge_completion_pos);
+     memcpy(s->bridge_completion + s->bridge_completion_pos, buf, size);
+@@ -981,6 +1031,7 @@
+         s->bridge_waiting_final = false;
+         s->bridge_discard_completion = false;
+         s->bridge_completion_pos = 0;
++        s->bridge_control_pos = 0;
+         vams_pcie_set_error(s, VAMS_ERROR_DMA | VAMS_ERROR_QUEUE);
+         if (publish && s->cq_depth && !vams_pcie_cq_full(s)) {
+             struct vams_completion completion = { 0 };
+@@ -1617,7 +1668,7 @@
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 8,
++    .version_id = 9,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+@@ -1652,6 +1703,9 @@
+         VMSTATE_UINT32_V(bridge_completion_pos, VamsPcieState, 3),
+         VMSTATE_BOOL_V(bridge_inflight, VamsPcieState, 3),
+         VMSTATE_BOOL_V(bridge_waiting_final, VamsPcieState, 8),
++        VMSTATE_UINT8_ARRAY_V(bridge_control, VamsPcieState,
++                              VAMS_COMPLETION_SIZE, 9),
++        VMSTATE_UINT32_V(bridge_control_pos, VamsPcieState, 9),
+         VMSTATE_BOOL_V(bridge_discard_completion, VamsPcieState, 3),
+         VMSTATE_INT64_V(command_deadline_ns, VamsPcieState, 5),
+         VMSTATE_INT64_V(engine_finish_ns, VamsPcieState, 5),
+@@ -1704,6 +1758,8 @@
+     s->cq_error = false;
+     memset(&s->bridge_submission, 0, sizeof(s->bridge_submission));
+     s->bridge_completion_pos = 0;
++    memset(s->bridge_control, 0, sizeof(s->bridge_control));
++    s->bridge_control_pos = 0;
+     s->bridge_inflight = false;
+     s->bridge_waiting_final = false;
+     s->bridge_discard_completion = false;

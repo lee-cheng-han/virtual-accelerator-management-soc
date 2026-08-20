@@ -478,6 +478,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0015-hw-misc-add-vams-deterministic-fault-controls.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0017-hw-misc-add-vams-bounded-firmware-abort.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

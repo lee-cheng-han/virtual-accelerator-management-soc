@@ -26,13 +26,14 @@
 #define VAMS_RECEIVER_PRIORITY 1
 #define VAMS_VALIDATOR_PRIORITY 2
 #define VAMS_COMPLETION_PRIORITY 2
-#define VAMS_RESULT_PRIORITY 2
+#define VAMS_RECOVERY_PRIORITY 0
 #define VAMS_SCHEDULER_PRIORITY 3
 #define VAMS_COMMAND_STACK_SIZE 1536
 #define VAMS_VALIDATOR_STACK_SIZE 2048
 #define VAMS_HEARTBEAT_PERIOD K_MSEC(250)
 #define VAMS_MAILBOX_POLL_PERIOD K_MSEC(100)
 #define VAMS_WATCHDOG_TIMEOUT_MS 1000U
+#define VAMS_ABORT_ACK_TIMEOUT_MS 100U
 #define VAMS_FIRMWARE_VERSION UINT32_C(0x00010000)
 
 struct vams_heartbeat {
@@ -49,7 +50,7 @@ K_THREAD_STACK_DEFINE(vams_mailbox_stack, VAMS_TASK_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_receiver_stack, VAMS_COMMAND_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_validator_stack, VAMS_VALIDATOR_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_scheduler_stack, VAMS_COMMAND_STACK_SIZE);
-K_THREAD_STACK_DEFINE(vams_result_stack, VAMS_COMMAND_STACK_SIZE);
+K_THREAD_STACK_DEFINE(vams_recovery_stack, VAMS_COMMAND_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_completion_stack, VAMS_COMMAND_STACK_SIZE);
 K_THREAD_STACK_DEFINE(vams_health_stack, VAMS_TASK_STACK_SIZE);
 K_MEM_SLAB_DEFINE(vams_command_pool, sizeof(struct vams_command_object),
@@ -73,7 +74,7 @@ static struct k_thread vams_mailbox_thread;
 static struct k_thread vams_receiver_thread;
 static struct k_thread vams_validator_thread;
 static struct k_thread vams_scheduler_thread;
-static struct k_thread vams_result_thread;
+static struct k_thread vams_recovery_thread;
 static struct k_thread vams_completion_thread;
 static struct k_thread vams_health_thread;
 static atomic_t producer_epoch;
@@ -85,6 +86,8 @@ static atomic_t validation_queue_high_water;
 static atomic_t ready_queue_high_water;
 static atomic_t running_queue_high_water;
 static atomic_t completion_queue_high_water;
+static atomic_t recovery_attempt_count;
+static atomic_t recovery_escalation_count;
 static uint32_t command_generation;
 static uint32_t command_sequence;
 
@@ -338,7 +341,7 @@ static void vams_command_scheduler(void *unused1, void *unused2, void *unused3)
 	}
 }
 
-static void vams_engine_result(void *unused1, void *unused2, void *unused3)
+static void vams_recovery_manager(void *unused1, void *unused2, void *unused3)
 {
 	ARG_UNUSED(unused1);
 	ARG_UNUSED(unused2);
@@ -347,31 +350,58 @@ static void vams_engine_result(void *unused1, void *unused2, void *unused3)
 	for (;;) {
 		struct vams_command_object *command;
 		struct vams_completion result;
+		uint64_t now_ms;
 		int status;
 
 		status = k_msgq_get(&vams_running_queue, &command, K_FOREVER);
 		__ASSERT_NO_MSG(status == 0);
-		status = vams_command_result_receive(command_portal, &result,
-						     K_FOREVER);
+		now_ms = k_uptime_get();
+		status = vams_command_result_receive(
+			command_portal, &result,
+			command->deadline_ms > now_ms ?
+			K_MSEC(command->deadline_ms - now_ms) : K_NO_WAIT);
+		if (status == -EAGAIN) {
+			atomic_inc(&recovery_attempt_count);
+			vams_scheduler_begin_abort(command, k_uptime_get());
+			printk("Recovery: event=abort-request command=0x%08" PRIx32
+			       " attempt=%" PRId32 "\n",
+			       sys_le32_to_cpu(command->submission.command_id),
+			       (int32_t)atomic_get(&recovery_attempt_count));
+			status = vams_command_abort(command_portal,
+						    &command->completion);
+			if (status == 0) {
+				status = vams_command_result_receive(
+					command_portal, &result,
+					K_MSEC(VAMS_ABORT_ACK_TIMEOUT_MS));
+			} else if (status == -EBUSY) {
+				status = vams_command_result_receive(
+					command_portal, &result, K_NO_WAIT);
+			}
+			if (status == -EAGAIN) {
+				atomic_inc(&recovery_escalation_count);
+				vams_scheduler_escalate(command, k_uptime_get());
+				printk("Recovery: event=abort-escalated"
+				       " command=0x%08" PRIx32
+				       " count=%" PRId32 "\n",
+				       sys_le32_to_cpu(
+					       command->submission.command_id),
+				       (int32_t)atomic_get(
+					       &recovery_escalation_count));
+				goto publish;
+			}
+		}
 		__ASSERT_NO_MSG(status == 0);
 		status = vams_scheduler_apply_result(command, &result);
 		if (status == -EPROTO) {
-			command->completion.status =
-				sys_cpu_to_le16(VAMS_STATUS_FAILED);
-			command->completion.error_code =
-				sys_cpu_to_le16(VAMS_ERR_ENGINE);
-			command->completion.bytes_processed = 0U;
-			command->completion.result_crc = 0U;
-			command->completion.device_timestamp =
-				sys_cpu_to_le64(k_uptime_get());
-			vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
-						  VAMS_COMMAND_COMPLETED_ERROR);
+			atomic_inc(&recovery_escalation_count);
+			vams_scheduler_escalate(command, k_uptime_get());
 			printk("Recovery: rejected mismatched engine result"
 			       " command=0x%08" PRIx32 "\n",
 			       sys_le32_to_cpu(command->submission.command_id));
 		} else {
 			__ASSERT_NO_MSG(status == 0);
 		}
+	publish:
 		status = vams_queue_put(&vams_completion_queue, &command,
 					&completion_queue_high_water);
 		__ASSERT_NO_MSG(status == 0);
@@ -427,7 +457,9 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 
 	printk("Resources: static_sram=%zu/%u pool_high=%" PRId32 "/%u"
 	       " validation_high=%" PRId32 "/%u ready_high=%" PRId32 "/%u"
-	       " running_high=%" PRId32 "/1 completion_high=%" PRId32 "/%u\n",
+	       " running_high=%" PRId32 "/1 completion_high=%" PRId32 "/%u"
+	       " recovery_attempts=%" PRId32
+	       " recovery_escalations=%" PRId32 "\n",
 	       static_sram, CONFIG_SRAM_SIZE * 1024U,
 	       (int32_t)atomic_get(&command_pool_high_water),
 	       VAMS_COMMAND_POOL_SIZE,
@@ -437,10 +469,12 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 	       VAMS_COMMAND_POOL_SIZE,
 	       (int32_t)atomic_get(&running_queue_high_water),
 	       (int32_t)atomic_get(&completion_queue_high_water),
-	       VAMS_COMMAND_POOL_SIZE);
+	       VAMS_COMMAND_POOL_SIZE,
+	       (int32_t)atomic_get(&recovery_attempt_count),
+	       (int32_t)atomic_get(&recovery_escalation_count));
 	printk("Stacks: producer=%zu/%zu monitor=%zu/%zu mailbox=%zu/%zu"
 	       " receiver=%zu/%zu validator=%zu/%zu scheduler=%zu/%zu"
-	       " result=%zu/%zu completion=%zu/%zu health=%zu/%zu\n",
+	       " recovery=%zu/%zu completion=%zu/%zu health=%zu/%zu\n",
 	       vams_stack_used(&vams_producer_thread,
 			       K_THREAD_STACK_SIZEOF(vams_producer_stack)),
 	       K_THREAD_STACK_SIZEOF(vams_producer_stack),
@@ -459,9 +493,9 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 	       vams_stack_used(&vams_scheduler_thread,
 			       K_THREAD_STACK_SIZEOF(vams_scheduler_stack)),
 	       K_THREAD_STACK_SIZEOF(vams_scheduler_stack),
-	       vams_stack_used(&vams_result_thread,
-			       K_THREAD_STACK_SIZEOF(vams_result_stack)),
-	       K_THREAD_STACK_SIZEOF(vams_result_stack),
+	       vams_stack_used(&vams_recovery_thread,
+			       K_THREAD_STACK_SIZEOF(vams_recovery_stack)),
+	       K_THREAD_STACK_SIZEOF(vams_recovery_stack),
 	       vams_stack_used(&vams_completion_thread,
 			       K_THREAD_STACK_SIZEOF(vams_completion_stack)),
 	       K_THREAD_STACK_SIZEOF(vams_completion_stack),
@@ -597,11 +631,11 @@ int main(void)
 	status = k_thread_name_set(&vams_completion_thread, "vams_completion");
 	__ASSERT_NO_MSG(status == 0);
 
-	(void)k_thread_create(&vams_result_thread, vams_result_stack,
-			      K_THREAD_STACK_SIZEOF(vams_result_stack),
-			      vams_engine_result, NULL, NULL, NULL,
-			      VAMS_RESULT_PRIORITY, 0, K_FOREVER);
-	status = k_thread_name_set(&vams_result_thread, "vams_result");
+	(void)k_thread_create(&vams_recovery_thread, vams_recovery_stack,
+			      K_THREAD_STACK_SIZEOF(vams_recovery_stack),
+			      vams_recovery_manager, NULL, NULL, NULL,
+			      VAMS_RECOVERY_PRIORITY, 0, K_FOREVER);
+	status = k_thread_name_set(&vams_recovery_thread, "vams_recovery");
 	__ASSERT_NO_MSG(status == 0);
 
 	(void)k_thread_create(&vams_scheduler_thread, vams_scheduler_stack,
@@ -638,7 +672,7 @@ int main(void)
 	k_thread_start(&vams_producer_thread);
 	k_thread_start(&vams_mailbox_thread);
 	k_thread_start(&vams_completion_thread);
-	k_thread_start(&vams_result_thread);
+	k_thread_start(&vams_recovery_thread);
 	k_thread_start(&vams_scheduler_thread);
 	k_thread_start(&vams_validator_thread);
 	k_thread_start(&vams_receiver_thread);

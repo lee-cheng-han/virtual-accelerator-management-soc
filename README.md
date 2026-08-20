@@ -23,9 +23,11 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > Every payload operation uses a bounded 64 KiB DMA working chunk, including
 > streaming CRC state and a full 16 MiB copy/integrity throughput smoke.
 > Zephyr now schedules fixed-pool command objects through receiver, validator,
-> earliest-deadline scheduler, engine-result, and exactly-once completion tasks;
+> earliest-deadline scheduler, recovery-manager, and exactly-once completion tasks;
 > payload byte counts, CRCs, reset outcomes, and identity return to firmware
 > before the only host-visible completion is published.
+> The recovery manager bounds result waits by command deadline, requests engine
+> abort, waits 100 ms for acknowledgment, and records/escalates missing results.
 > Engine-only reset now terminates active work with a reset completion, advances
 > a private engine epoch, preserves queued work, and suppresses stale callbacks.
 > A property-gated debug block now injects six one-shot PCI faults, selects an
@@ -283,14 +285,13 @@ scaffolding and gain tracked files only when their components are built.
 - All four v1 payload commands use a correctness-first virtual-time QEMU engine.
   Dispatch, deadlines, and reset cancellation are asynchronous, and payload
   working sets are bounded, but all chunks still execute within one callback.
-  A host-requested engine reset is implemented; mid-command firmware abort
-  acknowledgment and host telemetry are not.
+  Host-requested engine reset and firmware-requested bounded abort are
+  implemented; per-chunk cancellation points and host telemetry are not.
 - The endpoint retains a direct validator only for isolated QTests; integrated
   NOP and all four v1 payload commands use real Zephyr validation.
-- Firmware scheduling covers capture through authorization publication. The
-  payload engine does not yet return running-command events to firmware, so
-  firmware-side abort acknowledgment and DMA-result telemetry remain
-  unimplemented. QEMU independently provides engine-only recovery.
+- Firmware owns commands from capture through terminal publication, including
+  engine results, bounded abort acknowledgment, and missing-result escalation.
+  Recovery serialization for every reset scope remains future work.
 - Fault injection currently targets the PCI queue, engine, DMA, and interrupt
   model. Firmware-task hang and mailbox-corruption injection remain planned
   cross-subsystem extensions.

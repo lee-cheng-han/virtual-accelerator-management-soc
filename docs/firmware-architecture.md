@@ -6,7 +6,7 @@ register side effects; the host owns buffer mapping and ring production.
 
 The current firmware captures generated-ABI descriptors into an eight-object
 slab and transfers sole ownership through receiver, validator,
-earliest-deadline scheduler, engine-result, and completion tasks. It validates
+earliest-deadline scheduler, recovery-manager, and completion tasks. It validates
 every v1 opcode in fixed first-error order, publishes payload authorization,
 validates the returned command ID and cookie, applies the terminal state, and
 publishes the only host-visible result exactly once. The PCI model performs
@@ -15,8 +15,9 @@ authorized payload work and returns byte count, CRC, error, and reset status.
 The current PCI model supplies the asynchronous execution boundary after
 firmware authorization. It captures the command deadline and reset generation,
 exposes BUSY, and returns success, failure, timeout, or reset through the result
-portal. A bounded running-command abort handshake and centralized firmware
-recovery manager remain planned.
+portal. The recovery manager bounds waits by the command deadline, issues an
+abort, waits 100 ms for acknowledgment, and escalates a missing or mismatched
+result to a terminal engine failure.
 
 ## Boot and steady state
 
@@ -35,19 +36,18 @@ first.
 
 | Task | Priority | Stack | May block on | Responsibility |
 |---|---:|---:|---|---|
-| Recovery manager | cooperative -1 | 1536 B | recovery event queue; bounded hardware ack | Serialize abort/reset and generation changes. |
+| Recovery manager | preemptible 0 | 1536 B | running queue; result/abort portal | Validate results; enforce deadlines; request abort; count escalation. |
 | Command receiver | preemptible 1 | 1536 B | doorbell semaphore, descriptor DMA completion | Fetch complete descriptors; advance SQ head only after capture. |
 | Validator | preemptible 2 | 2048 B | command-input queue, output capacity | Apply fixed validation order; build rejection or accepted command. |
 | Scheduler | preemptible 3 | 1536 B | ready queue, engine slot | EDF by absolute timeout, FIFO tie-break; dispatch one command. |
-| Engine result | preemptible 2 | 1536 B | single-entry running queue, result portal | Acknowledge result, validate identity, and apply terminal state. |
 | Completion service | preemptible 2 | 1536 B | result queue, CQ-space semaphore | DMA-write completion, publish CQ tail, request interrupt. |
 | Watchdog service | preemptible 4 | 1024 B | periodic timer | Check task progress epochs and pet hardware watchdog. |
 | Telemetry service | preemptible 5 | 1536 B | periodic timer/snapshot request | Aggregate counters and atomically publish snapshots. |
 | Logging service | preemptible 7 | 1536 B | bounded log queue/UART | Export structured records; drop rather than block producers. |
 
-Recovery, telemetry, and logging rows describe the target decomposition; the
+Telemetry and logging rows describe the target decomposition; the
 current build combines telemetry with watchdog health and uses synchronous UART
-logging. The dedicated result task and completion task keep the validator and
+logging. The recovery manager and completion task keep the validator and
 scheduler out of the terminal publication path.
 
 ## Objects and ownership
@@ -55,10 +55,10 @@ scheduler out of the terminal publication path.
 Firmware allocates a fixed pool of eight command
 objects. Each object has exactly one owning task at a time; transfer through a
 Zephyr `k_msgq` moves ownership. Receiver owns captured bytes, validator owns
-VALIDATING, scheduler owns QUEUED, the engine-result service owns RUNNING while
+VALIDATING, scheduler owns QUEUED, the recovery manager owns RUNNING/ABORTING while
 waiting for the portal, and completion service owns terminal result
-publication. The planned recovery manager may freeze all owners using events
-and acknowledgments rather than taking their locks.
+publication. Extending recovery ownership across every reset/watchdog scope
+will use events and acknowledgments rather than taking other owners' locks.
 
 | Shared object | Synchronization | Rule |
 |---|---|---|

@@ -114,11 +114,46 @@ def check_management_portal(executable, firmware, temp):
         if receive_exact(connection, len(result)) != result:
             raise AssertionError("portal terminal completion mismatch")
 
-        next_submission = MODULE.submission(1, command_id + 1, cookie + 1)
+        next_id = command_id + 1
+        next_cookie = cookie + 1
+        next_submission = MODULE.submission(
+            1, next_id, next_cookie, opcode=1, source=0x3000,
+            destination=0x4000, length=64,
+        )
         connection.sendall(next_submission)
         wait_for_status(qtest, 1)
         if qtest.read(0x10030100, len(next_submission)) != next_submission:
             raise AssertionError("portal did not return to submission mode")
+        qtest.write32(0x10030008, 1)
+        next_authorization = MODULE.COMPLETION.pack(
+            next_id, 0, 0, 0, 0, next_cookie, 0
+        )
+        qtest.write(0x10030200, next_authorization)
+        qtest.write32(0x1003000C, 1)
+        if receive_exact(connection, MODULE.COMPLETION.size) != \
+                next_authorization:
+            raise AssertionError("second portal authorization mismatch")
+
+        abort = MODULE.COMPLETION.pack(
+            next_id, 3, 19, 0, 0, next_cookie, 2000
+        )
+        qtest.write(0x10030200, abort)
+        qtest.write32(0x10030024, 1)
+        if receive_exact(connection, MODULE.COMPLETION.size) != abort:
+            raise AssertionError("portal abort request mismatch")
+        if qtest.read32(0x10030028) != 1:
+            raise AssertionError("portal abort counter did not advance")
+        connection.sendall(abort)
+        wait_for_status(qtest, 1 << 5)
+        if qtest.read(0x10030300, len(abort)) != abort:
+            raise AssertionError("portal abort result mismatch")
+        if qtest.read32(0x10030020) != 2:
+            raise AssertionError("portal result counter mismatch after abort")
+        qtest.write32(0x1003001C, 1)
+        qtest.write(0x10030200, abort)
+        qtest.write32(0x1003000C, 1)
+        if receive_exact(connection, MODULE.COMPLETION.size) != abort:
+            raise AssertionError("portal abort completion mismatch")
     finally:
         if connection is not None:
             connection.close()
@@ -266,19 +301,66 @@ def main():
             )
             qtest.write32(MODULE.BAR0 + 0x214, 2)
 
-            lost_id = 0xA11CE003
-            lost_cookie = 0x8877665544332211
+            abort_id = 0xA11CE003
+            abort_cookie = 0x66554433221100FF
+            errors.clear()
+
+            def abort_service():
+                try:
+                    receive_exact(connection, MODULE.SUBMISSION.size)
+                    connection.sendall(MODULE.COMPLETION.pack(
+                        abort_id, 0, 0, 0, 0, abort_cookie, 0
+                    ))
+                    request = MODULE.COMPLETION.pack(
+                        abort_id, 3, 19, 0, 0, abort_cookie, 0
+                    )
+                    connection.sendall(request)
+                    result = receive_exact(connection, MODULE.COMPLETION.size)
+                    fields = MODULE.COMPLETION.unpack(result)
+                    if fields[:6] != (
+                        abort_id, 3, 19, 0, 0, abort_cookie
+                    ):
+                        raise AssertionError(
+                            f"unexpected abort result: {fields[:6]}"
+                        )
+                    connection.sendall(result)
+                except Exception as error:  # Propagate thread failures.
+                    errors.append(error)
+
+            service = threading.Thread(target=abort_service)
+            service.start()
             qtest.write(
                 MODULE.SQ_BASE + 2 * MODULE.SUBMISSION.size,
-                MODULE.submission(1, lost_id, lost_cookie),
+                MODULE.submission(
+                    1, abort_id, abort_cookie, opcode=1, source=source,
+                    destination=destination, length=len(payload),
+                ),
             )
             qtest.write32(MODULE.BAR0 + 0x114, 3)
+            MODULE.wait_for_completion(qtest, 3)
+            service.join(timeout=3)
+            if service.is_alive():
+                raise RuntimeError("abort service did not finish")
+            if errors:
+                raise errors[0]
+            MODULE.check_completion(
+                qtest, 2, (abort_id, 3, 19, 0, 0, abort_cookie)
+            )
+            qtest.write32(MODULE.BAR0 + 0x214, 3)
+
+            lost_id = 0xA11CE004
+            lost_cookie = 0x8877665544332211
+            qtest.write(
+                MODULE.SQ_BASE + 3 * MODULE.SUBMISSION.size,
+                MODULE.submission(1, lost_id, lost_cookie),
+            )
+            qtest.write32(MODULE.BAR0 + 0x114, 4)
             receive_exact(connection, MODULE.SUBMISSION.size)
             connection.close()
             connection = None
-            MODULE.wait_for_completion(qtest, 3)
+            MODULE.wait_for_completion(qtest, 4)
             MODULE.check_completion(
-                qtest, 2, (lost_id, 2, 18, 0, 0, lost_cookie)
+                qtest, 3, (lost_id, 2, 18, 0, 0, lost_cookie)
             )
         except (AssertionError, OSError, RuntimeError) as error:
             print(f"firmware ownership QTest failed: {error}", file=sys.stderr)
@@ -289,7 +371,7 @@ def main():
             listener.close()
             qtest.close()
 
-    print("VAMS firmware-owned portal, completion, reset, and disconnect: PASS")
+    print("VAMS firmware-owned portal, abort, reset, and disconnect: PASS")
     return 0
 
 

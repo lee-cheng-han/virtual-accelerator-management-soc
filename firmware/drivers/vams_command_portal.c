@@ -18,6 +18,7 @@
 #define VAMS_COMMAND_FW_ACK 0x08U
 #define VAMS_COMMAND_FW_COMPLETE 0x0cU
 #define VAMS_COMMAND_RESULT_ACK 0x1cU
+#define VAMS_COMMAND_FW_ABORT 0x24U
 #define VAMS_COMMAND_SUBMISSION 0x100U
 #define VAMS_COMMAND_COMPLETION 0x200U
 #define VAMS_COMMAND_RESULT 0x300U
@@ -83,6 +84,30 @@ int vams_command_complete(const struct device *dev,
 	}
 	barrier_dmem_fence_full();
 	sys_write32(1U, config->base + VAMS_COMMAND_FW_COMPLETE);
+	return 0;
+}
+
+int vams_command_abort(const struct device *dev,
+		       const struct vams_completion *request)
+{
+	const struct vams_command_portal_config *config = dev->config;
+	uint32_t words[VAMS_COMPLETION_WORDS];
+
+	if (request == NULL) {
+		return -EINVAL;
+	}
+	if (sys_read32(config->base + VAMS_COMMAND_STATUS) &
+	    VAMS_COMMAND_RESULT_PENDING) {
+		return -EBUSY;
+	}
+
+	memcpy(words, request, sizeof(*request));
+	for (size_t index = 0U; index < ARRAY_SIZE(words); index++) {
+		sys_write32(words[index], config->base + VAMS_COMMAND_COMPLETION +
+					 index * sizeof(uint32_t));
+	}
+	barrier_dmem_fence_full();
+	sys_write32(1U, config->base + VAMS_COMMAND_FW_ABORT);
 	return 0;
 }
 

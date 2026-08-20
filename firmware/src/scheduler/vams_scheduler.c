@@ -89,11 +89,13 @@ void vams_scheduler_cancel(struct vams_command_object *command,
 int vams_scheduler_apply_result(struct vams_command_object *command,
 				const struct vams_completion *result)
 {
+	enum vams_command_state current;
 	uint16_t status;
 
 	__ASSERT_NO_MSG(command != NULL);
 	__ASSERT_NO_MSG(result != NULL);
-	__ASSERT_NO_MSG(command->state == VAMS_COMMAND_RUNNING);
+	__ASSERT_NO_MSG(command->state == VAMS_COMMAND_RUNNING ||
+			command->state == VAMS_COMMAND_ABORTING);
 	if (result->command_id != command->submission.command_id ||
 	    result->user_cookie != command->submission.user_cookie) {
 		return -EPROTO;
@@ -101,11 +103,41 @@ int vams_scheduler_apply_result(struct vams_command_object *command,
 
 	command->completion = *result;
 	status = sys_le16_to_cpu(result->status);
-	vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
+	current = command->state;
+	vams_scheduler_transition(command, current,
 				  status == VAMS_STATUS_SUCCESS ?
 				  VAMS_COMMAND_COMPLETED :
 				  VAMS_COMMAND_COMPLETED_ERROR);
 	return 0;
+}
+
+void vams_scheduler_begin_abort(struct vams_command_object *command,
+				uint64_t timestamp_ms)
+{
+	__ASSERT_NO_MSG(command != NULL);
+	__ASSERT_NO_MSG(command->state == VAMS_COMMAND_RUNNING);
+	command->completion.status = sys_cpu_to_le16(VAMS_STATUS_TIMED_OUT);
+	command->completion.error_code = sys_cpu_to_le16(VAMS_ERR_TIMEOUT);
+	command->completion.bytes_processed = 0U;
+	command->completion.result_crc = 0U;
+	command->completion.device_timestamp = sys_cpu_to_le64(timestamp_ms);
+	vams_scheduler_transition(command, VAMS_COMMAND_RUNNING,
+				  VAMS_COMMAND_ABORTING);
+}
+
+void vams_scheduler_escalate(struct vams_command_object *command,
+			     uint64_t timestamp_ms)
+{
+	__ASSERT_NO_MSG(command != NULL);
+	__ASSERT_NO_MSG(command->state == VAMS_COMMAND_RUNNING ||
+			command->state == VAMS_COMMAND_ABORTING);
+	command->completion.status = sys_cpu_to_le16(VAMS_STATUS_FAILED);
+	command->completion.error_code = sys_cpu_to_le16(VAMS_ERR_ENGINE);
+	command->completion.bytes_processed = 0U;
+	command->completion.result_crc = 0U;
+	command->completion.device_timestamp = sys_cpu_to_le64(timestamp_ms);
+	vams_scheduler_transition(command, command->state,
+				  VAMS_COMMAND_COMPLETED_ERROR);
 }
 
 void vams_scheduler_mark_published(struct vams_command_object *command)

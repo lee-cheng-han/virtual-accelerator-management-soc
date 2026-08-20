@@ -138,8 +138,11 @@ transition and exactly one firmware publication, verifies the host CQ timeout,
 then requires a clean NOP and a second exactly-once trace.
 `firmware-ownership-smoke` emulates both sides of the private transport. It
 checks management-portal submission/authorization/result/final framing, payload
-result return, firmware-final CQ publication, engine-reset reconciliation, and
-a terminal failure when the bridge disconnects with owned work.
+result return, abort request/result framing, firmware-final CQ publication,
+engine-reset reconciliation, and a terminal failure when the bridge disconnects
+with owned work. The real dual-QEMU payload test forces an engine hang, verifies
+acknowledged firmware abort, drops one abort result to verify bounded escalation,
+and requires clean progress afterward.
 `firmware-scheduler-unit` compiles the production EDF comparator as strict host
 C and verifies deadline ordering plus FIFO acceptance-sequence tie-breaking.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.

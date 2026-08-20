@@ -51,6 +51,8 @@ behind the PCI queue front end.
 | `0x18` | `COMPLETE_COUNT` | RO | Saturating published-completion count |
 | `0x1c` | `RESULT_ACK` | WO | Write `1` after capturing an engine result |
 | `0x20` | `RESULT_COUNT` | RO | Saturating accepted-engine-result count |
+| `0x24` | `FW_ABORT` | WO | Write `1` after staging a firmware abort request |
+| `0x28` | `ABORT_COUNT` | RO | Saturating accepted-abort-request count |
 | `0x100–0x13c` | `SUBMISSION[0..15]` | RW | 64-byte descriptor staging window |
 | `0x200–0x21c` | `COMPLETION[0..7]` | RW | 32-byte completion staging window |
 | `0x300–0x31c` | `RESULT[0..7]` | RO | 32-byte modeled-engine result window |
@@ -65,13 +67,17 @@ Overwrite and protocol bits are sticky W1C diagnostics.
 
 The Zephyr command task polls for bit 0 and validates NOP or any v1 payload
 opcode using the normative first-error order. Payload authorization causes the
-portal to accept one engine result; the result task acknowledges bit 5,
-validates ID and cookie, and publishes the terminal completion. The
+portal to accept one engine result; the recovery manager acknowledges bit 5,
+validates ID and cookie, and publishes the terminal completion. At deadline it
+stages `TIMED_OUT/TIMEOUT`, rings `FW_ABORT`, and waits a bounded 100 ms for the
+result before escalation. The
 `vams-mgmt.test-command` property injects a valid
 NOP with value `1` or an
 unsupported-version NOP with value `2` at cold boot. This is deterministic test
 injection only. The optional `command-chardev` property now drives the same
 ownership registers from the PCI queue controller in the dual-QEMU test.
+The test-only `x-drop-abort-result` property drops one abort result to verify
+the bounded escalation path; it defaults off.
 
 ## Watchdog, reset, and telemetry registers
 
@@ -134,6 +140,6 @@ and unsupported-version completions from Zephyr.
   intentionally polling-only.
 - Telemetry reads are individually atomic 32-bit operations; the split uptime
   value does not yet provide a multiword snapshot protocol.
-- Portal state is migration version 4 while earlier management snapshots remain
+- Portal state is migration version 5 while earlier management snapshots remain
   loadable with empty result state. End-to-end live migration is not yet an
   accepted or tested platform capability.
