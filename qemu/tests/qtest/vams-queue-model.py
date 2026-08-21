@@ -263,6 +263,7 @@ class QueueModel:
             status |= 1 << 1
         if self.cq_enabled and self.cq_full():
             status |= 1 << 2
+            status |= 1 << 3
         if self.cq_error:
             status |= 1 << 4
         return status

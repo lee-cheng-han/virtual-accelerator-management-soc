@@ -154,6 +154,33 @@ def check_management_portal(executable, firmware, temp):
         qtest.write32(0x1003000C, 1)
         if receive_exact(connection, MODULE.COMPLETION.size) != abort:
             raise AssertionError("portal abort completion mismatch")
+
+        reset_id = command_id + 2
+        reset_cookie = cookie + 2
+        reset_submission = MODULE.submission(
+            1, reset_id, reset_cookie, opcode=1, source=0x5000,
+            destination=0x6000, length=64,
+        )
+        connection.sendall(reset_submission)
+        wait_for_status(qtest, 1)
+        qtest.write32(0x10030008, 1)
+        reset_authorization = MODULE.COMPLETION.pack(
+            reset_id, 0, 0, 0, 0, reset_cookie, 0
+        )
+        qtest.write(0x10030200, reset_authorization)
+        qtest.write32(0x1003000C, 1)
+        if receive_exact(connection, MODULE.COMPLETION.size) != \
+                reset_authorization:
+            raise AssertionError("reset-test authorization mismatch")
+        qtest.write32(0x1002000C, 1)
+        reset_notice = MODULE.COMPLETION.unpack(
+            receive_exact(connection, MODULE.COMPLETION.size)
+        )
+        if reset_notice[:6] != (reset_id, 5, 21, 0, 0, reset_cookie):
+            raise AssertionError(f"reset notification mismatch: {reset_notice}")
+        if qtest.read32(0x10020038) != 1 or \
+                qtest.read32(0x1002003C) != 0:
+            raise AssertionError("reset notification evidence mismatch")
     finally:
         if connection is not None:
             connection.close()
@@ -348,19 +375,67 @@ def main():
             )
             qtest.write32(MODULE.BAR0 + 0x214, 3)
 
-            lost_id = 0xA11CE004
-            lost_cookie = 0x8877665544332211
+            management_reset_id = 0xA11CE004
+            management_reset_cookie = 0x8877665544332211
+            reset_ready = threading.Event()
+            errors.clear()
+
+            def management_reset_service():
+                try:
+                    receive_exact(connection, MODULE.SUBMISSION.size)
+                    connection.sendall(MODULE.COMPLETION.pack(
+                        management_reset_id, 0, 0, 0, 0,
+                        management_reset_cookie, 0
+                    ))
+                    if not reset_ready.wait(timeout=3):
+                        raise RuntimeError("management reset was not released")
+                    connection.sendall(MODULE.COMPLETION.pack(
+                        management_reset_id, 5, 21, 0, 0,
+                        management_reset_cookie, 0
+                    ))
+                except Exception as error:  # Propagate thread failures.
+                    errors.append(error)
+
+            service = threading.Thread(target=management_reset_service)
+            service.start()
+            qtest.write32(MODULE.BAR0 + 0xF14, 1)
             qtest.write(
                 MODULE.SQ_BASE + 3 * MODULE.SUBMISSION.size,
-                MODULE.submission(1, lost_id, lost_cookie),
+                MODULE.submission(
+                    1, management_reset_id, management_reset_cookie, opcode=1,
+                    source=source, destination=destination,
+                    length=len(payload),
+                ),
             )
             qtest.write32(MODULE.BAR0 + 0x114, 4)
+            MODULE.wait_for_engine_busy(qtest)
+            reset_ready.set()
+            MODULE.wait_for_completion(qtest, 4)
+            service.join(timeout=3)
+            if service.is_alive():
+                raise RuntimeError("management reset service did not finish")
+            if errors:
+                raise errors[0]
+            MODULE.check_completion(
+                qtest, 3,
+                (management_reset_id, 5, 21, 0, 0,
+                 management_reset_cookie),
+            )
+            qtest.write32(MODULE.BAR0 + 0x214, 4)
+
+            lost_id = 0xA11CE005
+            lost_cookie = 0x9988776655443322
+            qtest.write(
+                MODULE.SQ_BASE + 4 * MODULE.SUBMISSION.size,
+                MODULE.submission(1, lost_id, lost_cookie),
+            )
+            qtest.write32(MODULE.BAR0 + 0x114, 5)
             receive_exact(connection, MODULE.SUBMISSION.size)
             connection.close()
             connection = None
-            MODULE.wait_for_completion(qtest, 4)
+            MODULE.wait_for_completion(qtest, 5)
             MODULE.check_completion(
-                qtest, 3, (lost_id, 2, 18, 0, 0, lost_cookie)
+                qtest, 4, (lost_id, 2, 18, 0, 0, lost_cookie)
             )
         except (AssertionError, OSError, RuntimeError) as error:
             print(f"firmware ownership QTest failed: {error}", file=sys.stderr)
@@ -371,7 +446,7 @@ def main():
             listener.close()
             qtest.close()
 
-    print("VAMS firmware-owned portal, abort, reset, and disconnect: PASS")
+    print("VAMS firmware-owned portal, cross-reset, abort, and disconnect: PASS")
     return 0
 
 

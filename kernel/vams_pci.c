@@ -331,6 +331,10 @@ static int vams_configure_queues(struct vams_device *vdev)
 	vams_writel(vdev, VAMS_REG_CQ_BASE_LO, lower_32_bits(vdev->cq_dma));
 	vams_writel(vdev, VAMS_REG_CQ_BASE_HI, upper_32_bits(vdev->cq_dma));
 	vams_writel(vdev, VAMS_REG_CQ_DEPTH, VAMS_QUEUE_DEPTH);
+	if (vdev->capabilities & VAMS_CAP_CQ_WATERMARK)
+		vams_writel(vdev, VAMS_REG_CQ_WATERMARK,
+			    VAMS_CQ_WATERMARK_HIGH << 16 |
+			    VAMS_CQ_WATERMARK_LOW);
 	vams_writel(vdev, VAMS_REG_SQ_BASE_LO, lower_32_bits(vdev->sq_dma));
 	vams_writel(vdev, VAMS_REG_SQ_BASE_HI, upper_32_bits(vdev->sq_dma));
 	vams_writel(vdev, VAMS_REG_SQ_DEPTH, VAMS_QUEUE_DEPTH);

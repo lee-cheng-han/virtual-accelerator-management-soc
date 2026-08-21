@@ -592,9 +592,12 @@ int main(void)
 	vams_management_snapshot(management, &boot_snapshot);
 	command_generation = boot_snapshot.reset_generation;
 	printk("Reset: reason=%" PRIu32 " watchdog_count=%" PRIu32
-	       " generation=%" PRIu32 "\n", boot_snapshot.reset_reason,
+	       " generation=%" PRIu32 " notifications=%" PRIu32
+	       " notification_failures=%" PRIu32 "\n",
+	       boot_snapshot.reset_reason,
 	       boot_snapshot.watchdog_reset_count,
-	       boot_snapshot.reset_generation);
+	       boot_snapshot.reset_generation, boot_snapshot.reset_notify_count,
+	       boot_snapshot.reset_notify_fail_count);
 	if (boot_snapshot.reset_reason == VAMS_RESET_REASON_WATCHDOG) {
 		printk("Recovery: watchdog reset observed\n");
 	}

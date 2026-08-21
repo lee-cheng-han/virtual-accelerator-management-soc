@@ -97,13 +97,19 @@ the bounded escalation path; it defaults off.
 | `0x2c` | `MAILBOX_TX_COUNT` | RO | Saturating published-response count |
 | `0x30` | `RESET_GENERATION` | RO | Management-reset generation |
 | `0x34` | `STATUS` | RO/W1C | Bit 0 records a rejected write |
+| `0x38` | `RESET_NOTIFY_COUNT` | RO | Accepted active-command reset notifications |
+| `0x3c` | `RESET_NOTIFY_FAIL_COUNT` | RO | Failed active-command reset notifications |
 
 The timeout defaults to 5000 ms and accepts values from 100 through 60000 ms
 only while disabled. The firmware configures 1000 ms. Its health task samples
 producer, monitor, and mailbox-service progress epochs every 250 ms. It
 publishes telemetry and pets the watchdog only when every task has advanced.
 
-A management reset restores the ELF-backed SRAM image and resets the CPU,
+A management or watchdog reset first sends `RESET/RESET` for any command still
+owned by the portal. Successful transport acceptance and failure increment
+separate saturating counters, which survive the warm reset and are reported by
+the next firmware boot. A management reset then restores the ELF-backed SRAM
+image and resets the CPU,
 ACLINT, and UART. It clears volatile mailbox and firmware telemetry, while
 preserving reset reason, reset generation, watchdog reset count, mailbox
 counters, watchdog configuration, and diagnostic status. This makes a
@@ -140,6 +146,6 @@ and unsupported-version completions from Zephyr.
   intentionally polling-only.
 - Telemetry reads are individually atomic 32-bit operations; the split uptime
   value does not yet provide a multiword snapshot protocol.
-- Portal state is migration version 5 while earlier management snapshots remain
+- Portal state is migration version 6 while earlier management snapshots remain
   loadable with empty result state. End-to-end live migration is not yet an
   accepted or tested platform capability.

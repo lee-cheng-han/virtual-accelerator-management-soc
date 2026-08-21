@@ -57,8 +57,9 @@ objects. Each object has exactly one owning task at a time; transfer through a
 Zephyr `k_msgq` moves ownership. Receiver owns captured bytes, validator owns
 VALIDATING, scheduler owns QUEUED, the recovery manager owns RUNNING/ABORTING while
 waiting for the portal, and completion service owns terminal result
-publication. Extending recovery ownership across every reset/watchdog scope
-will use events and acknowledgments rather than taking other owners' locks.
+publication. Recovery ownership across reset/watchdog scope now uses terminal
+portal notifications rather than taking other owners' locks;
+explicit firmware acknowledgment deadlines remain planned.
 
 | Shared object | Synchronization | Rule |
 |---|---|---|
@@ -111,6 +112,10 @@ Potential inversion remains when completion is blocked by a full CQ while
 commands occupy the pool. The receiver applies a reserved-capacity watermark:
 it stops SQ capture early enough that every accepted command has a command
 object and a result slot. Watchdog/log/telemetry cannot consume these slots.
+The implemented PCI queue controller additionally applies host-programmed
+high/low CQ watermark hysteresis before the ring becomes full. Extending the
+same deterministic rejection/defer policy to every internal firmware queue is
+the remaining overload task.
 
 ## Watchdog and logging
 

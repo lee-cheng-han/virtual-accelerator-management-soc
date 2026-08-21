@@ -87,6 +87,8 @@ NOP with its own exactly-once trace.
 `make firmware-ownership-smoke` independently exercises result and abort
 framing, firmware-final publication, engine-reset reconciliation, and
 bridge-disconnect terminal recovery without requiring the Zephyr compiler.
+It also verifies that management/watchdog-style reset notification cancels an
+active modeled engine command and produces exactly one `RESET/RESET` CQ entry.
 
 ## Remaining recovery boundary
 
@@ -95,5 +97,7 @@ terminal publication. Engine, queue, and device reset results are acknowledged;
 the PCI endpoint discards reset-scope terminal replies after ownership is
 reconciled. A bridge disconnect synthesizes one terminal host failure and
 cancels modeled work. The high-priority recovery manager now owns bounded
-running abort and escalation. The remaining boundary is serialization of every
-reset/watchdog scope plus a CQ-backpressure and overload policy.
+running abort and escalation. Management/watchdog resets reconcile an active
+portal command, and the host CQ has tested high/low watermark hysteresis.
+Remaining work is an explicit firmware reset-acknowledgment deadline plus
+bounded overload policy for the firmware slab, task queues, telemetry, and logs.

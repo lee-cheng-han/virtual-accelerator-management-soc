@@ -22,10 +22,12 @@ source_hash()
 
 mkdir -p "$(dirname -- "$source_dir")"
 if [ ! -d "$source_dir/.git" ]; then
-	git clone --filter=blob:none --no-checkout \
-		https://gitlab.com/qemu-project/qemu.git "$source_dir"
+	mkdir -p "$source_dir"
+	git -C "$source_dir" init --quiet
+	git -C "$source_dir" remote add origin \
+		https://gitlab.com/qemu-project/qemu.git
 	git -C "$source_dir" fetch --depth 1 origin "$VAMS_QEMU_COMMIT"
-	git -C "$source_dir" checkout --detach "$VAMS_QEMU_COMMIT"
+	git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
 fi
 
 actual_commit=$(git -C "$source_dir" rev-parse HEAD)

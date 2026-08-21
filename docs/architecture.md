@@ -127,6 +127,13 @@ and only then exposes READY. Generation is internal command metadata, not a v1
 descriptor field; it prevents a pre-reset callback from producing a stale CQ
 entry.
 
+Management and watchdog reset use the same terminal ownership rule. Before the
+portal is cleared and the RV32 CPU reboots, the management model sends a
+`RESET/RESET` completion for its active command. The PCIe endpoint accepts that
+notification during validation or engine execution, cancels the private engine
+epoch, and publishes one host result. Accepted/failed notification counters
+survive the warm reset for firmware diagnostics.
+
 ## Interrupt flow
 
 Vector 0 signals CQ availability; vector 1 may signal fatal/error state. A CQ
@@ -136,6 +143,11 @@ Firmware peripheral ISRs acknowledge the device source and enqueue an event;
 they never parse descriptors or perform DMA. Interrupt status remains sticky
 until W1C acknowledgment. A lost MSI-X is not data loss: driver polling of CQ
 tail and a watchdog timer provide fallback.
+
+The host programs CQ high/low occupancy watermarks before enabling the queue.
+At the high threshold the endpoint stops consuming SQ entries; it resumes only
+after the host drains to the low threshold. Peak occupancy and throttle-entry
+count persist across queue/device reset, making overload behavior observable.
 
 ## Recovery hierarchy
 

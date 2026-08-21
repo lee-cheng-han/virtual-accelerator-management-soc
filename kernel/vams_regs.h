@@ -36,6 +36,9 @@
 #define VAMS_REG_CQ_DOORBELL           0x214U
 #define VAMS_REG_CQ_CONTROL            0x218U
 #define VAMS_REG_CQ_STATUS             0x21cU
+#define VAMS_REG_CQ_WATERMARK          0x220U
+#define VAMS_REG_CQ_HIGH_WATER         0x224U
+#define VAMS_REG_CQ_BACKPRESSURE_COUNT 0x228U
 
 #define VAMS_REG_INTR_STATUS           0x300U
 #define VAMS_REG_INTR_MASK             0x304U
@@ -52,7 +55,8 @@
 #define VAMS_CAP_ENGINE_RESET          BIT(4)
 #define VAMS_CAP_POLLING_CQ            BIT(5)
 #define VAMS_CAP_DEBUG_FAULT           BIT(6)
-#define VAMS_CAP_KNOWN                 GENMASK(6, 0)
+#define VAMS_CAP_CQ_WATERMARK          BIT(7)
+#define VAMS_CAP_KNOWN                 GENMASK(7, 0)
 
 #define VAMS_STATUS_READY              BIT(0)
 #define VAMS_STATUS_FW_RUNNING         BIT(1)
@@ -74,8 +78,11 @@
 #define VAMS_QUEUE_ENABLE              BIT(0)
 #define VAMS_QUEUE_RESET               BIT(1)
 #define VAMS_QUEUE_STATUS_ENABLED      BIT(0)
+#define VAMS_QUEUE_STATUS_BACKPRESSURE BIT(3)
 
 #define VAMS_QUEUE_DEPTH               16U
+#define VAMS_CQ_WATERMARK_HIGH         12U
+#define VAMS_CQ_WATERMARK_LOW          8U
 
 #define VAMS_MSIX_VECTORS              2
 #define VAMS_MSIX_CQ_VECTOR            0

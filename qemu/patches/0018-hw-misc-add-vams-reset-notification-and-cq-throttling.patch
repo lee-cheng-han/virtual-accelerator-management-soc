@@ -1,0 +1,485 @@
+From: VAMS contributors <vams@example.com>
+Subject: [PATCH 18/18] hw/misc: add reset notification and CQ throttling
+
+Notify an active PCIe request before management or watchdog reset clears the
+firmware portal. Add programmable completion-queue watermark hysteresis and
+persistent high-water/backpressure evidence so overload stops SQ consumption
+before the CQ becomes full.
+
+Signed-off-by: VAMS contributors <vams@example.com>
+---
+--- a/hw/misc/vams_mgmt.c
++++ b/hw/misc/vams_mgmt.c
+@@ -72,6 +72,8 @@
+     VAMS_CONTROL_MAILBOX_TX_COUNT = 0x2c,
+     VAMS_CONTROL_RESET_GENERATION = 0x30,
+     VAMS_CONTROL_STATUS = 0x34,
++    VAMS_CONTROL_RESET_NOTIFY_COUNT = 0x38,
++    VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT = 0x3c,
+ };
+ 
+ enum {
+@@ -115,6 +117,8 @@
+     uint32_t mailbox_tx_count;
+     uint32_t reset_generation;
+     uint32_t control_status;
++    uint32_t reset_notify_count;
++    uint32_t reset_notify_fail_count;
+     uint32_t command_status;
+     uint32_t command_submission[VAMS_COMMAND_WORDS];
+     uint32_t command_completion[VAMS_COMPLETION_WORDS];
+@@ -129,6 +133,7 @@
+     uint32_t command_rx_pos;
+     bool command_result_expected;
+     bool command_abort_result_pending;
++    bool command_active;
+     bool x_drop_abort_result;
+     bool warm_reset_pending;
+ };
+@@ -158,8 +163,38 @@
+     timer_mod(s->watchdog_timer, deadline);
+ }
+ 
++static void vams_command_notify_reset(VamsMgmtState *s)
++{
++    const struct vams_submission *submission =
++        (const struct vams_submission *)s->command_submission;
++    struct vams_completion completion = { 0 };
++    int written;
++
++    if (!s->command_active) {
++        return;
++    }
++    completion.command_id = submission->command_id;
++    completion.status = cpu_to_le16(VAMS_STATUS_RESET);
++    completion.error_code = cpu_to_le16(VAMS_ERR_RESET);
++    completion.user_cookie = submission->user_cookie;
++    completion.device_timestamp = cpu_to_le64(
++        qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
++    written = qemu_chr_fe_backend_connected(&s->command_chr) ?
++        qemu_chr_fe_write_all(&s->command_chr, (const uint8_t *)&completion,
++                              sizeof(completion)) : -1;
++    if (written == sizeof(completion)) {
++        s->reset_notify_count = vams_sat_inc(s->reset_notify_count);
++        qemu_chr_fe_accept_input(&s->command_chr);
++    } else {
++        s->reset_notify_fail_count =
++            vams_sat_inc(s->reset_notify_fail_count);
++        s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++    }
++}
++
+ static void vams_management_reset(VamsMgmtState *s, uint32_t reason)
+ {
++    vams_command_notify_reset(s);
+     s->last_reset_reason = reason;
+     s->reset_generation++;
+     s->firmware_heartbeat = 0;
+@@ -175,6 +210,7 @@
+     s->command_rx_pos = 0;
+     s->command_result_expected = false;
+     s->command_abort_result_pending = false;
++    s->command_active = false;
+     vams_mailbox_update_irq(s);
+     vams_watchdog_reload(s);
+     s->warm_reset_pending = true;
+@@ -274,6 +310,7 @@
+     s->command_rx_pos = 0;
+     s->command_status |= VAMS_COMMAND_H2F_PENDING;
+     s->command_submit_count = vams_sat_inc(s->command_submit_count);
++    s->command_active = true;
+ }
+ 
+ static void vams_command_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -312,6 +349,7 @@
+         }
+         s->command_status |= VAMS_COMMAND_H2F_PENDING;
+         s->command_submit_count = vams_sat_inc(s->command_submit_count);
++        s->command_active = true;
+         return;
+     case VAMS_COMMAND_FW_ACK:
+         if (value32 != 1 ||
+@@ -348,10 +386,13 @@
+             s->command_status &= ~VAMS_COMMAND_F2H_PENDING;
+             if (final_result) {
+                 s->command_result_expected = false;
++                s->command_active = false;
+             } else if (status == VAMS_STATUS_SUCCESS &&
+                        opcode >= VAMS_OP_MEM_COPY &&
+                        opcode <= VAMS_OP_VECTOR_ADD) {
+                 s->command_result_expected = true;
++            } else {
++                s->command_active = false;
+             }
+             qemu_chr_fe_accept_input(&s->command_chr);
+         }
+@@ -389,6 +430,7 @@
+             return;
+         }
+         s->command_status &= ~VAMS_COMMAND_F2H_PENDING;
++        s->command_active = false;
+         return;
+     case VAMS_COMMAND_STATUS:
+         s->command_status &= ~(value32 &
+@@ -502,6 +544,10 @@
+         return s->reset_generation;
+     case VAMS_CONTROL_STATUS:
+         return s->control_status;
++    case VAMS_CONTROL_RESET_NOTIFY_COUNT:
++        return s->reset_notify_count;
++    case VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT:
++        return s->reset_notify_fail_count;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       TYPE_VAMS_MGMT ": invalid control read at 0x%" HWADDR_PRIx
+@@ -632,13 +678,18 @@
+         s->command_abort_count = 0;
+         s->command_abort_result_pending = false;
+     }
++    if (version_id < 6) {
++        s->reset_notify_count = 0;
++        s->reset_notify_fail_count = 0;
++        s->command_active = false;
++    }
+     vams_mailbox_update_irq(s);
+     return 0;
+ }
+ 
+ static const VMStateDescription vams_mgmt_vmstate = {
+     .name = TYPE_VAMS_MGMT,
+-    .version_id = 5,
++    .version_id = 6,
+     .minimum_version_id = 1,
+     .post_load = vams_mgmt_post_load,
+     .fields = (const VMStateField[]) {
+@@ -657,6 +708,8 @@
+         VMSTATE_UINT32(mailbox_tx_count, VamsMgmtState),
+         VMSTATE_UINT32(reset_generation, VamsMgmtState),
+         VMSTATE_UINT32(control_status, VamsMgmtState),
++        VMSTATE_UINT32_V(reset_notify_count, VamsMgmtState, 6),
++        VMSTATE_UINT32_V(reset_notify_fail_count, VamsMgmtState, 6),
+         VMSTATE_UINT32_V(command_status, VamsMgmtState, 2),
+         VMSTATE_UINT32_ARRAY_V(command_submission, VamsMgmtState,
+                                VAMS_COMMAND_WORDS, 2),
+@@ -673,6 +726,7 @@
+         VMSTATE_BOOL_V(command_result_expected, VamsMgmtState, 4),
+         VMSTATE_UINT32_V(command_abort_count, VamsMgmtState, 5),
+         VMSTATE_BOOL_V(command_abort_result_pending, VamsMgmtState, 5),
++        VMSTATE_BOOL_V(command_active, VamsMgmtState, 6),
+         VMSTATE_BOOL_V(x_drop_abort_result, VamsMgmtState, 5),
+         VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
+         VMSTATE_END_OF_LIST()
+@@ -705,6 +759,8 @@
+     s->mailbox_tx_count = 0;
+     s->reset_generation = 0;
+     s->control_status = 0;
++    s->reset_notify_count = 0;
++    s->reset_notify_fail_count = 0;
+     s->command_status = 0;
+     memset(s->command_submission, 0, sizeof(s->command_submission));
+     memset(s->command_completion, 0, sizeof(s->command_completion));
+@@ -716,6 +772,7 @@
+     s->command_rx_pos = 0;
+     s->command_result_expected = false;
+     s->command_abort_result_pending = false;
++    s->command_active = false;
+     if (s->test_command) {
+         s->command_submission[0] = s->test_command == 2 ? 2 :
+                                    VAMS_DESC_VERSION_1;
+@@ -724,6 +781,7 @@
+         s->command_submission[9] = 0x11223344;
+         s->command_status = VAMS_COMMAND_H2F_PENDING;
+         s->command_submit_count = 1;
++        s->command_active = true;
+     }
+     s->warm_reset_pending = false;
+     vams_mailbox_update_irq(s);
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -62,6 +62,9 @@
+     VAMS_REG_CQ_DOORBELL = 0x214,
+     VAMS_REG_CQ_CONTROL = 0x218,
+     VAMS_REG_CQ_STATUS = 0x21c,
++    VAMS_REG_CQ_WATERMARK = 0x220,
++    VAMS_REG_CQ_HIGH_WATER = 0x224,
++    VAMS_REG_CQ_BACKPRESSURE_COUNT = 0x228,
+     VAMS_REG_INTR_STATUS = 0x300,
+     VAMS_REG_INTR_MASK = 0x304,
+     VAMS_REG_INTR_FORCE = 0x308,
+@@ -90,6 +93,7 @@
+     VAMS_CAP_ENGINE_RESET = BIT(4),
+     VAMS_CAP_POLLING_CQ = BIT(5),
+     VAMS_CAP_DEBUG_FAULT = BIT(6),
++    VAMS_CAP_CQ_WATERMARK = BIT(7),
+     VAMS_STATUS_READY = BIT(0),
+     VAMS_STATUS_QUEUES_READY = BIT(2),
+     VAMS_STATUS_ENGINE_BUSY = BIT(3),
+@@ -113,6 +117,7 @@
+     VAMS_QUEUE_STATUS_ENABLED = BIT(0),
+     VAMS_QUEUE_STATUS_EMPTY = BIT(1),
+     VAMS_QUEUE_STATUS_FULL = BIT(2),
++    VAMS_QUEUE_STATUS_BACKPRESSURE = BIT(3),
+     VAMS_ENGINE_STATUS_BUSY = BIT(0),
+     VAMS_ENGINE_STATUS_HUNG = BIT(2),
+     VAMS_ENGINE_STATUS_ERROR = BIT(3),
+@@ -173,6 +178,11 @@
+     uint32_t cq_tail;
+     uint32_t cq_control;
+     bool cq_error;
++    uint32_t cq_watermark_high;
++    uint32_t cq_watermark_low;
++    uint32_t cq_high_water;
++    uint32_t cq_backpressure_count;
++    bool cq_backpressure;
+     CharFrontend command_chr;
+     union {
+         struct vams_submission command;
+@@ -247,7 +257,14 @@
+         g_assert(!(s->cq_depth & (s->cq_depth - 1)));
+         g_assert(s->cq_head < s->cq_depth);
+         g_assert(s->cq_tail < s->cq_depth);
++        if (s->cq_watermark_high) {
++            g_assert(s->cq_watermark_high < s->cq_depth);
++            g_assert(s->cq_watermark_low < s->cq_watermark_high);
++        }
+     }
++    g_assert(!s->cq_backpressure ||
++             ((s->cq_control & VAMS_QUEUE_ENABLE) &&
++              s->cq_watermark_high));
+     g_assert(!(s->bridge_inflight && s->bridge_discard_completion));
+     g_assert(!(s->bridge_inflight && s->engine_inflight));
+     g_assert(!(s->bridge_discard_completion && s->engine_inflight));
+@@ -313,6 +330,39 @@
+     return s->cq_depth && ((s->cq_tail + 1) & (s->cq_depth - 1)) == s->cq_head;
+ }
+ 
++static uint32_t vams_pcie_sat_inc(uint32_t value)
++{
++    return value == UINT32_MAX ? value : value + 1;
++}
++
++static uint32_t vams_pcie_cq_occupancy(const VamsPcieState *s)
++{
++    if (!s->cq_depth) {
++        return 0;
++    }
++    return (s->cq_tail - s->cq_head) & (s->cq_depth - 1);
++}
++
++static void vams_pcie_update_cq_backpressure(VamsPcieState *s)
++{
++    uint32_t occupancy = vams_pcie_cq_occupancy(s);
++
++    s->cq_high_water = MAX(s->cq_high_water, occupancy);
++    if (!(s->cq_control & VAMS_QUEUE_ENABLE) ||
++        !s->cq_watermark_high) {
++        s->cq_backpressure = false;
++        return;
++    }
++    if (!s->cq_backpressure && occupancy >= s->cq_watermark_high) {
++        s->cq_backpressure = true;
++        s->cq_backpressure_count =
++            vams_pcie_sat_inc(s->cq_backpressure_count);
++    } else if (s->cq_backpressure &&
++               occupancy <= s->cq_watermark_low) {
++        s->cq_backpressure = false;
++    }
++}
++
+ static uint32_t vams_pcie_sq_status(const VamsPcieState *s)
+ {
+     uint32_t status = 0;
+@@ -344,6 +394,9 @@
+         if (vams_pcie_cq_full(s)) {
+             status |= VAMS_QUEUE_STATUS_FULL;
+         }
++        if (s->cq_backpressure) {
++            status |= VAMS_QUEUE_STATUS_BACKPRESSURE;
++        }
+     }
+     if (s->cq_error) {
+         status |= BIT(4);
+@@ -404,6 +457,9 @@
+     s->cq_tail = 0;
+     s->cq_control = 0;
+     s->cq_error = false;
++    s->cq_watermark_high = 0;
++    s->cq_watermark_low = 0;
++    s->cq_backpressure = false;
+     s->intr_status &= ~VAMS_INTR_CQ;
+     msix_clr_pending(PCI_DEVICE(s), 0);
+     s->reset_generation++;
+@@ -540,6 +596,7 @@
+     MemTxResult result;
+ 
+     vams_pcie_check_invariants(s);
++    g_assert(!vams_pcie_cq_full(s));
+     result = pci_dma_write(pdev, address, completion, sizeof(*completion));
+     if (result != MEMTX_OK) {
+         s->cq_error = true;
+@@ -547,6 +604,7 @@
+         return false;
+     }
+     s->cq_tail = (s->cq_tail + 1) & (s->cq_depth - 1);
++    vams_pcie_update_cq_backpressure(s);
+     vams_pcie_raise_interrupt(s, VAMS_INTR_CQ);
+     vams_pcie_check_invariants(s);
+     return true;
+@@ -960,7 +1018,16 @@
+         valid = request->command_id ==
+                     s->bridge_submission.command.command_id &&
+                 request->user_cookie ==
+-                    s->bridge_submission.command.user_cookie &&
++                    s->bridge_submission.command.user_cookie;
++        if (valid && le16_to_cpu(request->status) == VAMS_STATUS_RESET &&
++            le16_to_cpu(request->error_code) == VAMS_ERR_RESET) {
++            vams_pcie_cancel_engine(s);
++            s->engine_epoch++;
++            *completion = *request;
++            vams_pcie_publish_completion(s, completion);
++            return;
++        }
++        valid = valid &&
+                 le16_to_cpu(request->status) == VAMS_STATUS_TIMED_OUT &&
+                 le16_to_cpu(request->error_code) == VAMS_ERR_TIMEOUT;
+         vams_pcie_cancel_engine(s);
+@@ -1064,6 +1131,7 @@
+     }
+ 
+     while (s->sq_head != s->sq_tail && !vams_pcie_cq_full(s) &&
++           !s->cq_backpressure &&
+            !s->bridge_inflight && !s->bridge_discard_completion &&
+            !s->engine_inflight) {
+         struct vams_submission submission;
+@@ -1183,6 +1251,9 @@
+     s->cq_tail = 0;
+     s->cq_control = 0;
+     s->cq_error = false;
++    s->cq_watermark_high = 0;
++    s->cq_watermark_low = 0;
++    s->cq_backpressure = false;
+     for (vector = 0; vector < VAMS_MSIX_VECTORS; vector++) {
+         msix_clr_pending(PCI_DEVICE(s), vector);
+     }
+@@ -1217,7 +1288,7 @@
+         return 1;
+     case VAMS_REG_CAPABILITIES:
+         return VAMS_CAP_DMA | VAMS_CAP_MSIX | VAMS_CAP_ENGINE_RESET |
+-               VAMS_CAP_POLLING_CQ |
++               VAMS_CAP_POLLING_CQ | VAMS_CAP_CQ_WATERMARK |
+                (s->x_vams_debug ? VAMS_CAP_DEBUG_FAULT : 0);
+     case VAMS_REG_MAX_TRANSFER:
+         return 0x01000000;
+@@ -1266,6 +1337,12 @@
+         return s->cq_control;
+     case VAMS_REG_CQ_STATUS:
+         return vams_pcie_cq_status(s);
++    case VAMS_REG_CQ_WATERMARK:
++        return (s->cq_watermark_high << 16) | s->cq_watermark_low;
++    case VAMS_REG_CQ_HIGH_WATER:
++        return s->cq_high_water;
++    case VAMS_REG_CQ_BACKPRESSURE_COUNT:
++        return s->cq_backpressure_count;
+     case VAMS_REG_INTR_STATUS:
+         return s->intr_status;
+     case VAMS_REG_INTR_MASK:
+@@ -1339,7 +1416,8 @@
+         return;
+     }
+ 
+-    if (offset >= VAMS_REG_SQ_BASE_LO && offset <= VAMS_REG_CQ_STATUS &&
++    if (offset >= VAMS_REG_SQ_BASE_LO &&
++        offset <= VAMS_REG_CQ_BACKPRESSURE_COUNT &&
+         (s->device_status & VAMS_STATUS_RESETTING)) {
+         vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
+         return;
+@@ -1362,6 +1440,8 @@
+     case VAMS_REG_CQ_HEAD:
+     case VAMS_REG_CQ_TAIL:
+     case VAMS_REG_CQ_STATUS:
++    case VAMS_REG_CQ_HIGH_WATER:
++    case VAMS_REG_CQ_BACKPRESSURE_COUNT:
+     case VAMS_REG_ENGINE_STATUS:
+     case VAMS_REG_ENGINE_CONTROL:
+     case VAMS_REG_ENGINE_COMMAND_ID:
+@@ -1479,7 +1559,9 @@
+     }
+     case VAMS_REG_CQ_DEPTH:
+         if ((s->cq_control & VAMS_QUEUE_ENABLE) ||
+-            (value32 && !vams_pcie_valid_depth(value32))) {
++            (value32 && (!vams_pcie_valid_depth(value32) ||
++                         (s->cq_watermark_high &&
++                          s->cq_watermark_high >= value32)))) {
+             vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
+             return;
+         }
+@@ -1503,6 +1585,7 @@
+             return;
+         }
+         s->cq_head = value32;
++        vams_pcie_update_cq_backpressure(s);
+         vams_pcie_process_sq(s);
+         return;
+     }
+@@ -1521,8 +1604,27 @@
+             return;
+         }
+         s->cq_control = value32 & VAMS_QUEUE_ENABLE;
++        if (s->cq_control && !s->cq_watermark_high) {
++            s->cq_watermark_high = s->cq_depth - 1;
++            s->cq_watermark_low = s->cq_watermark_high - 1;
++        }
++        vams_pcie_update_cq_backpressure(s);
+         vams_pcie_update_queue_ready(s);
+         return;
++    case VAMS_REG_CQ_WATERMARK: {
++        uint32_t high = value32 >> 16;
++        uint32_t low = value32 & 0xffff;
++
++        if ((s->cq_control & VAMS_QUEUE_ENABLE) || !high || low >= high ||
++            high >= VAMS_QUEUE_MAX_DEPTH ||
++            (s->cq_depth && high >= s->cq_depth)) {
++            vams_pcie_set_error(s, VAMS_ERROR_BAD_CONFIG);
++            return;
++        }
++        s->cq_watermark_high = high;
++        s->cq_watermark_low = low;
++        return;
++    }
+     case VAMS_REG_ERROR_STATUS:
+         reserved = value32 & ~VAMS_ERROR_DEFINED;
+         s->error_status &= ~(value32 & VAMS_ERROR_DEFINED);
+@@ -1668,7 +1770,7 @@
+ 
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 9,
++    .version_id = 10,
+     .minimum_version_id = 2,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+@@ -1697,6 +1799,11 @@
+         VMSTATE_UINT32(cq_tail, VamsPcieState),
+         VMSTATE_UINT32(cq_control, VamsPcieState),
+         VMSTATE_BOOL(cq_error, VamsPcieState),
++        VMSTATE_UINT32_V(cq_watermark_high, VamsPcieState, 10),
++        VMSTATE_UINT32_V(cq_watermark_low, VamsPcieState, 10),
++        VMSTATE_UINT32_V(cq_high_water, VamsPcieState, 10),
++        VMSTATE_UINT32_V(cq_backpressure_count, VamsPcieState, 10),
++        VMSTATE_BOOL_V(cq_backpressure, VamsPcieState, 10),
+         VMSTATE_BUFFER_V(bridge_submission.bytes, VamsPcieState, 4),
+         VMSTATE_UINT8_ARRAY_V(bridge_completion, VamsPcieState,
+                               VAMS_COMPLETION_SIZE, 3),
+@@ -1756,6 +1863,11 @@
+     s->cq_tail = 0;
+     s->cq_control = 0;
+     s->cq_error = false;
++    s->cq_watermark_high = 0;
++    s->cq_watermark_low = 0;
++    s->cq_high_water = 0;
++    s->cq_backpressure_count = 0;
++    s->cq_backpressure = false;
+     memset(&s->bridge_submission, 0, sizeof(s->bridge_submission));
+     s->bridge_completion_pos = 0;
+     memset(s->bridge_control, 0, sizeof(s->bridge_control));
+

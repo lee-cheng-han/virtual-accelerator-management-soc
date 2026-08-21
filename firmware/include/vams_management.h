@@ -16,6 +16,8 @@ struct vams_management_snapshot {
 	uint32_t reset_reason;
 	uint32_t watchdog_reset_count;
 	uint32_t reset_generation;
+	uint32_t reset_notify_count;
+	uint32_t reset_notify_fail_count;
 	uint32_t mailbox_rx_count;
 	uint32_t mailbox_tx_count;
 	uint32_t status;

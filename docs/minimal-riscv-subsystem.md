@@ -104,6 +104,8 @@ git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"
 git -C /path/to/qemu apply \
   "$PWD/qemu/patches/0017-hw-misc-add-vams-bounded-firmware-abort.patch"
+git -C /path/to/qemu apply \
+  "$PWD/qemu/patches/0018-hw-misc-add-vams-reset-notification-and-cq-throttling.patch"
 ```
 
 Configure that tree with `riscv32-softmmu` and `x86_64-softmmu` to build both

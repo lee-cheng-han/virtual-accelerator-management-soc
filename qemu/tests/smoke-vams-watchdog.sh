@@ -41,7 +41,7 @@ test "$(grep -Fc 'Virtual Accelerator Management SoC Zephyr booting' "$output")"
 
 for checkpoint in \
     'Watchdog test: withholding pet' \
-    'Reset: reason=5 watchdog_count=1 generation=1' \
+    'Reset: reason=5 watchdog_count=1 generation=1 notifications=0 notification_failures=0' \
     'Recovery: watchdog reset observed' \
     'Telemetry: heartbeat=3 '
 do

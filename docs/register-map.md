@@ -66,7 +66,7 @@ high is written, then the aligned 64-bit pair commits atomically.
 | `004` | `VAMS_HW_IF_VERSION` | `00010000` | RO | HW | ABI interface major 1 in `[31:16]`, minor 0 in `[15:0]`. |
 | `008` | `VAMS_FW_VERSION` | `00000000` | RO | FW | Firmware semantic `major.minor.patch` as `[31:24].[23:16].[15:0]`; zero until boot publishes it; Mgmt reset clears it. |
 | `00c` | `VAMS_DESC_VERSION` | `00000001` | RO | HW | Highest accepted descriptor version; release 1 accepts exactly 1. |
-| `010` | `VAMS_CAPABILITIES` | `0000007f` | RO | HW | Bits 0 DMA, 1 MSI-X, 2 watchdog, 3 telemetry, 4 engine reset, 5 polling-safe CQ, 6 debug fault block. Feature bits read zero until implemented. |
+| `010` | `VAMS_CAPABILITIES` | `000000ff` | RO | HW | Bits 0 DMA, 1 MSI-X, 2 watchdog, 3 telemetry, 4 engine reset, 5 polling-safe CQ, 6 debug fault block, 7 CQ watermark throttling. Feature bits read zero until implemented. |
 | `014` | `VAMS_MAX_TRANSFER` | `01000000` | RO | HW | Maximum bytes in one command: 16 MiB. |
 | `018` | `VAMS_QUEUE_LIMITS` | `04000010` | RO | HW | `[15:0]=minimum depth 16`, `[31:16]=maximum depth 1024`. |
 | `01c` | `VAMS_DEVICE_STATUS` | `00000000` | RO | HW/FW | Bit 0 READY, 1 FW_RUNNING, 2 QUEUES_READY, 3 ENGINE_BUSY, 4 RESETTING, 5 FATAL, 6 CQ_STALLED. Live status; Device reset clears all, firmware/hardware set as state advances. |
@@ -108,7 +108,10 @@ doorbell are unsafe during active queue DMA except a RESET write.
 | `210` | `VAMS_CQ_TAIL` | `00000000` | RO | FW | Producer index; advances only after completion DMA is visible. |
 | `214` | `VAMS_CQ_DOORBELL` | `00000000` | WO | Host | New head `[9:0]`, `< depth`, may advance only across produced entries. Valid write releases CQ slots and may resume SQ. Read zero. Illegal advancement rejected + QUEUE. |
 | `218` | `VAMS_CQ_CONTROL` | `00000000` | RW/W1S | Host | Bit 0 ENABLE, bit 1 RESET self-clearing. RESET has the paired queue-reset behavior above. |
-| `21c` | `VAMS_CQ_STATUS` | `00000000` | RO | HW/FW | Bit 0 ENABLED, 1 EMPTY, 2 FULL, 3 WRITE_ACTIVE, 4 ERROR. FULL asserts with one slot unused and stalls acceptance before internal capacity exhausts. |
+| `21c` | `VAMS_CQ_STATUS` | `00000000` | RO | HW/FW | Bit 0 ENABLED, 1 EMPTY, 2 FULL, 3 BACKPRESSURE, 4 ERROR. FULL asserts with one slot unused. BACKPRESSURE uses the configured hysteresis thresholds. |
+| `220` | `VAMS_CQ_WATERMARK` | `00000000` | RW | Host | `[31:16]=high`, `[15:0]=low`; write only while CQ is disabled. Require `0 <= low < high < depth`. Enabling with zero selects `depth-1/depth-2`. |
+| `224` | `VAMS_CQ_HIGH_WATER` | `00000000` | RO | HW | Maximum observed CQ occupancy since Cold reset. Queue and Device reset preserve the evidence. |
+| `228` | `VAMS_CQ_BACKPRESSURE_COUNT` | `00000000` | RO | HW | Saturating count of transitions into BACKPRESSURE since Cold reset. |
 
 ## Interrupt control
 

@@ -18,8 +18,9 @@ Probe performs the following ordered checks and acquisitions:
 5. negotiate a coherent 64-bit DMA mask with a 32-bit fallback;
 6. allocate zeroed coherent SQ/CQ rings when DMA is advertised;
 7. allocate exactly two MSI-X vectors and install the CQ and async handlers;
-8. enable PCI bus mastering, program CQ then SQ, enable the device, and unmask
-   VAMS interrupt sources;
+8. enable PCI bus mastering, program CQ then SQ, configure 12/8 CQ high/low
+   watermarks when advertised, enable the device, and unmask VAMS interrupt
+   sources;
 9. register the reference-counted misc character device.
 
 Every error path unwinds acquired resources in reverse order. Remove first

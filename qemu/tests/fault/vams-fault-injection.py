@@ -151,7 +151,7 @@ def verify_debug_gate(executable):
         qtest = SMOKE.QTest(executable, None, log)
         try:
             SMOKE.configure_queues(qtest)
-            if qtest.read32(BAR0 + 0x010) != 0x33:
+            if qtest.read32(BAR0 + 0x010) != 0xB3:
                 raise AssertionError("production capabilities changed")
             if qtest.read32(FAULT_CONTROL) != 0xFFFFFFFF:
                 raise AssertionError("fault block visible without debug property")
@@ -171,7 +171,7 @@ def run_faults(executable):
         try:
             SMOKE.configure_queues(qtest)
             ring = CommandRing(qtest)
-            if qtest.read32(BAR0 + 0x010) != 0x73:
+            if qtest.read32(BAR0 + 0x010) != 0xF3:
                 raise AssertionError("debug capability was not advertised")
 
             qtest.write32(FAULT_CONTROL, DMA_TIMEOUT | ENGINE_HANG)

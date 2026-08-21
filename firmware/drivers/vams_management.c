@@ -27,6 +27,8 @@
 #define VAMS_CONTROL_MAILBOX_TX_COUNT 0x2cU
 #define VAMS_CONTROL_RESET_GENERATION 0x30U
 #define VAMS_CONTROL_STATUS 0x34U
+#define VAMS_CONTROL_RESET_NOTIFY_COUNT 0x38U
+#define VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT 0x3cU
 
 #define VAMS_WDT_ENABLE BIT(0)
 #define VAMS_WDT_PET_MAGIC UINT32_C(0x56414d53)
@@ -104,6 +106,10 @@ void vams_management_snapshot(const struct device *dev,
 		sys_read32(config->base + VAMS_CONTROL_WDT_RESET_COUNT);
 	snapshot->reset_generation =
 		sys_read32(config->base + VAMS_CONTROL_RESET_GENERATION);
+	snapshot->reset_notify_count =
+		sys_read32(config->base + VAMS_CONTROL_RESET_NOTIFY_COUNT);
+	snapshot->reset_notify_fail_count =
+		sys_read32(config->base + VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT);
 	snapshot->mailbox_rx_count =
 		sys_read32(config->base + VAMS_CONTROL_MAILBOX_RX_COUNT);
 	snapshot->mailbox_tx_count =

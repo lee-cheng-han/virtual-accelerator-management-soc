@@ -69,7 +69,7 @@ expected=$(printf '%s\n' \
     'OK 0x000000000000002a' \
     'OK 0x0000000000000001' \
     'OK 0x0000000000000000' \
-    'OK 0x00000000ffffffff' \
+    'OK 0x0000000000000000' \
     'OK 0x0000000000000000')
 actual=$(grep '^OK 0x' "$output")
 if [ "$actual" != "$expected" ]; then

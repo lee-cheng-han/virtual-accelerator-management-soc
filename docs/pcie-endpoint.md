@@ -7,13 +7,14 @@ provides the host-visible identity/control foundation plus one coherent command
 queue. The private dual-QEMU bridge and all firmware-owned v1 payload operations
 now work in integration tests. A virtual-time engine supplies BUSY state,
 deadline completion, bounded payload DMA, reset-safe callback cancellation, and
-engine-only recovery. Host payload UAPI and firmware-issued abort control remain
+engine-only recovery, firmware-issued abort control, management-reset terminal
+notification, and CQ watermark throttling. Host payload UAPI remains
 unavailable.
 
 The optional `x-vams-debug=true` property exposes deterministic fault and
 checkpoint registers for QTest only. Without it, capabilities remain
-`0x00000033`, the block reads as unimplemented, and accesses set illegal-MMIO.
-Debug-enabled test instances advertise `0x00000073`; this is not a production
+`0x000000b3`, the block reads as unimplemented, and accesses set illegal-MMIO.
+Debug-enabled test instances advertise `0x000000f3`; this is not a production
 feature contract.
 
 | PCI field | Value |
@@ -39,7 +40,7 @@ The following registers implement the behavior defined by the
 | `0x004` | `VAMS_HW_IF_VERSION` | `0x00010000` |
 | `0x008` | `VAMS_FW_VERSION` | Zero until firmware integration |
 | `0x00c` | `VAMS_DESC_VERSION` | Descriptor format 1 |
-| `0x010` | `VAMS_CAPABILITIES` | `0x00000033`, DMA, MSI-X, engine reset, polling-safe CQ |
+| `0x010` | `VAMS_CAPABILITIES` | `0x000000b3`, DMA, MSI-X, engine reset, polling-safe CQ, CQ watermarks |
 | `0x014` | `VAMS_MAX_TRANSFER` | 16 MiB architectural limit |
 | `0x018` | `VAMS_QUEUE_LIMITS` | Depth range 16–1024 |
 | `0x01c` | `VAMS_DEVICE_STATUS` | READY or RESETTING |
@@ -47,6 +48,9 @@ The following registers implement the behavior defined by the
 | `0x024` | `VAMS_ERROR_STATUS` | Defined W1C error bits |
 | `0x028` | `VAMS_RESET_GENERATION` | Increments on device-control reset |
 | `0x02c` | `VAMS_LAST_FATAL` | Preserved until cold reset |
+| `0x220` | `VAMS_CQ_WATERMARK` | Configurable high/low occupancy thresholds |
+| `0x224` | `VAMS_CQ_HIGH_WATER` | Peak CQ occupancy since cold reset |
+| `0x228` | `VAMS_CQ_BACKPRESSURE_COUNT` | Saturating throttle-entry count |
 | `0x300` | `VAMS_INTR_STATUS` | Four sticky W1C sources |
 | `0x304` | `VAMS_INTR_MASK` | Four source masks |
 | `0x308` | `VAMS_INTR_FORCE` | Deterministic source assertion |
@@ -62,7 +66,7 @@ The following registers implement the behavior defined by the
 | `0xf00–0xf10` | Fault controls/evidence/lock | Present only with `x-vams-debug=true` |
 | `0xf14–0xf1c` | Named checkpoint controls | Engine-start and pre-CQ pause/release |
 
-The SQ block at `0x100–0x11f` and CQ block at `0x200–0x21f` implement the
+The SQ block at `0x100–0x11f` and CQ block at `0x200–0x22b` implement the
 normative base, depth, index, doorbell, control, and status registers. BAR0
 offsets outside the listed subset are deliberately unimplemented. They return all ones,
 ignore writes, and set `VAMS_ERR_ILLEGAL_MMIO`. Accesses that are not aligned
@@ -93,8 +97,8 @@ active engine command/timer/deadline/generation are migration state. Live
 migration is not an accepted platform feature until an end-to-end migration
 regression exists.
 
-Migration state version 7 includes armed/triggered fault state, the saturating
-count, debug lock, engine-hung state, and checkpoint state. A destination still
+Migration state version 10 includes fault state, bridge control, CQ watermark
+configuration/evidence, debug lock, engine-hung state, and checkpoints. A destination still
 must be launched with a compatible debug property; live migration remains
 outside the accepted feature set.
 
@@ -102,6 +106,17 @@ Writing the engine bit in `RESET_REQUEST` synchronously cancels active work,
 publishes `RESET/RESET`, increments the private engine epoch, records
 host-engine as the reset reason, and preserves the queue generation and pending
 descriptors. A stale callback cannot modify payload or publish another CQ entry.
+
+If management firmware or its watchdog resets while it owns a request, the
+management model emits `RESET/RESET` before clearing portal state. The PCIe
+endpoint accepts that terminal notification during validation or active engine
+execution, cancels the engine epoch, and publishes exactly one CQ entry.
+
+The CQ high and low watermarks form a hysteresis pair. Reaching the high value
+sets `CQ_STATUS.BACKPRESSURE`, increments a saturating counter, and stops new SQ
+consumption. Draining to the low value clears throttling and resumes work. The
+Linux driver programs 12/8 for its depth-16 queues; the compatibility default
+uses 15/14.
 
 ## Validation
 
@@ -111,6 +126,8 @@ Build QEMU with `x86_64-softmmu`, then run:
 make pcie-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 make fault-injection-smoke \
+  QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
+make cq-backpressure-smoke \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
@@ -124,6 +141,10 @@ The QTest smoke uses a Q35 PCIe root bus and verifies:
 - rejection of ENABLE before valid queues and bus mastering are configured; and
 - asynchronous RESETTING → READY behavior, generation increment, and
   RESET_DONE publication.
+
+The CQ regression configures 4/2 high/low thresholds, submits eight NOPs, and
+requires three exact throttle/resume transitions, a peak occupancy of four,
+and no early SQ consumption or lost/duplicate completion.
 
 The fault regression separately verifies production gating, rejected
 multi-fault arms, six one-shot triggers, Nth-match selection, MSI-X suppression

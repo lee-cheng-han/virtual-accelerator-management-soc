@@ -79,7 +79,8 @@ status label, and whitespace. The executable management subsystem additionally
 uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`,
 `command-portal-smoke`, `firmware-command-smoke`, `firmware-pcie-smoke`, and
 `watchdog-smoke`. PCI validation uses `pcie-smoke`, `nop-smoke`,
-`queue-model-smoke`, and `kernel-smoke`. The model test compares every exposed
+`queue-model-smoke`, `cq-backpressure-smoke`, and `kernel-smoke`. The model test
+compares every exposed
 queue transition and completion across four deterministic randomized seeds.
 The kernel test boots a disposable Linux initramfs and exercises coherent
 queues, interrupt and polling completion, version rejection, 32 concurrent NOP
@@ -139,8 +140,12 @@ then requires a clean NOP and a second exactly-once trace.
 `firmware-ownership-smoke` emulates both sides of the private transport. It
 checks management-portal submission/authorization/result/final framing, payload
 result return, abort request/result framing, firmware-final CQ publication,
-engine-reset reconciliation, and a terminal failure when the bridge disconnects
-with owned work. The real dual-QEMU payload test forces an engine hang, verifies
+engine-reset reconciliation, management/watchdog-style terminal reset
+notification during active engine work, and a terminal failure when the bridge
+disconnects with owned work. `cq-backpressure-smoke` fills past a configured
+4/2 high/low threshold and proves three deterministic throttle/resume cycles,
+exact completions, a peak occupancy of four, and no SQ over-consumption. The
+real dual-QEMU payload test forces an engine hang, verifies
 acknowledged firmware abort, drops one abort result to verify bounded escalation,
 and requires clean progress afterward.
 `firmware-scheduler-unit` compiles the production EDF comparator as strict host

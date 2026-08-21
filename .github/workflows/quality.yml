@@ -32,9 +32,11 @@ jobs:
       - name: Fetch pinned QEMU source
         run: |
           . tools/versions.env
-          git clone --filter=blob:none --no-checkout https://gitlab.com/qemu-project/qemu.git build/qemu-upstream
+          mkdir -p build/qemu-upstream
+          git -C build/qemu-upstream init --quiet
+          git -C build/qemu-upstream remote add origin https://gitlab.com/qemu-project/qemu.git
           git -C build/qemu-upstream fetch --depth 1 origin "$VAMS_QEMU_COMMIT"
-          git -C build/qemu-upstream checkout --detach "$VAMS_QEMU_COMMIT"
+          git -C build/qemu-upstream checkout --quiet --detach FETCH_HEAD
       - name: Verify patch series against pinned QEMU
         run: make qemu-patch-check QEMU_SRC="$PWD/build/qemu-upstream"
 
@@ -52,7 +54,8 @@ jobs:
         run: make qemu-prepare
       - name: Run model, fuzz, fault, and stress checks
         run: |
-          make queue-model-smoke fuzz-smoke fault-injection-smoke stress-smoke \
+          make queue-model-smoke cq-backpressure-smoke fuzz-smoke \
+            fault-injection-smoke stress-smoke \
             QEMU_SYSTEM_X86_64="$PWD/build/qemu-src/build-vams/qemu-system-x86_64"
       - name: Archive stress evidence
         if: always()

@@ -66,7 +66,8 @@ VAMS_DEMO_OUTPUT ?=
 	payload-throughput-smoke \
 	stress-smoke firmware-resource-report stress-qualification \
 	dma-engine-smoke \
-	pcie-smoke nop-smoke queue-model-smoke kernel kernel-test-build \
+	pcie-smoke nop-smoke queue-model-smoke cq-backpressure-smoke \
+	kernel kernel-test-build \
 	kernel-uapi-test kernel-smoke \
 	descriptor-fuzz bar-fuzz fuzz-smoke source-check assurance-smoke \
 	qemu-patch-check tree clean demo
@@ -126,6 +127,8 @@ help:
 	  '  make nop-smoke    Verify SQ/CQ DMA and NOP completion behavior' \
 	  '  make queue-model-smoke' \
 	  '                   Compare randomized SQ/CQ sequences with the model' \
+	  '  make cq-backpressure-smoke' \
+	  '                   Verify CQ watermark hysteresis and overload throttling' \
 	  '  make descriptor-fuzz' \
 	  '                   Mutate raw descriptors with a replayable seed' \
 	  '  make bar-fuzz     Drive malformed BAR sequences with a replayable seed' \
@@ -335,6 +338,7 @@ firmware-resource-report: zephyr
 		--json-output build/reports/firmware-resources.json
 
 stress-qualification: firmware-resource-report queue-model-smoke \
+	cq-backpressure-smoke \
 	payload-throughput-smoke
 	@mkdir -p build/reports
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
@@ -358,6 +362,10 @@ nop-smoke:
 queue-model-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/qtest/vams-queue-model.py
+
+cq-backpressure-smoke:
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/qtest/vams-cq-backpressure.py
 
 descriptor-fuzz:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
@@ -384,7 +392,8 @@ source-check:
 	done
 	git diff --check
 
-assurance-smoke: check source-check queue-model-smoke fuzz-smoke \
+assurance-smoke: check source-check queue-model-smoke cq-backpressure-smoke \
+	fuzz-smoke \
 	fault-injection-smoke
 
 kernel:
@@ -415,7 +424,7 @@ qemu-patch-check:
 	@set -eu; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-	git clone --quiet --shared "$(QEMU_SRC)" "$$tmp/qemu"; \
+	git clone --quiet --no-local "$(QEMU_SRC)" "$$tmp/qemu"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0001-hw-riscv-add-vams-riscv-machine.patch"; \
 	git -C "$$tmp/qemu" apply \
@@ -482,6 +491,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0016-hw-misc-make-vams-firmware-own-engine-completions.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0017-hw-misc-add-vams-bounded-firmware-abort.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0017-hw-misc-add-vams-bounded-firmware-abort.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0018-hw-misc-add-vams-reset-notification-and-cq-throttling.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

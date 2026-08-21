@@ -28,6 +28,11 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > before the only host-visible completion is published.
 > The recovery manager bounds result waits by command deadline, requests engine
 > abort, waits 100 ms for acknowledgment, and records/escalates missing results.
+> Management and watchdog resets now emit a terminal reset notification before
+> clearing portal ownership, so an active PCIe engine request cannot disappear
+> across a management-CPU reboot. The host driver programs CQ high/low
+> watermarks; QEMU applies hysteresis, stops SQ consumption before exhaustion,
+> and retains high-water and backpressure counters.
 > Engine-only reset now terminates active work with a reset completion, advances
 > a private engine epoch, preserves queued work, and suppresses stale callbacks.
 > A property-gated debug block now injects six one-shot PCI faults, selects an
