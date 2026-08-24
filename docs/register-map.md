@@ -158,6 +158,7 @@ This block carries lifecycle notifications, never command payloads.
 | `60c` | `VAMS_RESET_REQUEST` | `00000000` | W1S | Host | Bits 0 QUEUES, 1 ENGINE, 2 MGMT, 3 DEVICE. Exactly one bit is legal; multiple/zero rejected. Self-clears when accepted. The current model implements bit 1 here; queue and device reset remain available through their dedicated controls. |
 | `610` | `VAMS_LAST_RESET_REASON` | `00000000` | RO | HW | Enum: 0 power-on, 1 host-device, 2 host-queue, 3 host-engine, 4 host-mgmt, 5 watchdog, 6 fatal, 7 QEMU migration. Updated at reset entry; preserved except Cold reset. |
 | `614` | `VAMS_RESET_STATUS` | `00000000` | RO | HW | Bit 0 IN_PROGRESS; `[7:4]` scope enum. Cleared only after DMA is stopped and reset is complete. |
+| `618` | `VAMS_RESET_ACK_TIMEOUT_COUNT` | `00000000` | RO | HW | Saturating count of queue/device reset terminal results not acknowledged by firmware within 100 ms of virtual time. Preserved across queue/device reset; Cold reset clears. Expiry releases bridge ownership and sets `ERROR_STATUS.FW|QUEUE`. |
 
 Engine reset is synchronous in the current model, so `RESET_STATUS` remains
 zero. It cancels the active timer, advances `ENGINE_EPOCH`, clears engine-local

@@ -33,6 +33,9 @@ Linux PCI driver only exposes the queues and lifecycle controls.
 > across a management-CPU reboot. The host driver programs CQ high/low
 > watermarks; QEMU applies hysteresis, stops SQ consumption before exhaustion,
 > and retains high-water and backpressure counters.
+> Queue/device reset ownership now has a 100 ms virtual-time firmware
+> acknowledgment deadline; a silent firmware path is released with persistent
+> timeout evidence and firmware/queue error reporting so recovery cannot stall.
 > Engine-only reset now terminates active work with a reset completion, advances
 > a private engine epoch, preserves queued work, and suppresses stale callbacks.
 > A property-gated debug block now injects six one-shot PCI faults, selects an
@@ -295,8 +298,8 @@ scaffolding and gain tracked files only when their components are built.
 - The endpoint retains a direct validator only for isolated QTests; integrated
   NOP and all four v1 payload commands use real Zephyr validation.
 - Firmware owns commands from capture through terminal publication, including
-  engine results, bounded abort acknowledgment, and missing-result escalation.
-  Recovery serialization for every reset scope remains future work.
+  engine results, bounded abort and reset acknowledgment, and missing-result
+  escalation. Management/watchdog reset serialization remains future work.
 - Fault injection currently targets the PCI queue, engine, DMA, and interrupt
   model. Firmware-task hang and mailbox-corruption injection remain planned
   cross-subsystem extensions.

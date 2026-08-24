@@ -54,7 +54,8 @@ jobs:
         run: make qemu-prepare
       - name: Run model, fuzz, fault, and stress checks
         run: |
-          make queue-model-smoke cq-backpressure-smoke fuzz-smoke \
+          make queue-model-smoke cq-backpressure-smoke \
+            firmware-ownership-model-smoke fuzz-smoke \
             fault-injection-smoke stress-smoke \
             QEMU_SYSTEM_X86_64="$PWD/build/qemu-src/build-vams/qemu-system-x86_64"
       - name: Archive stress evidence

@@ -99,5 +99,8 @@ reconciled. A bridge disconnect synthesizes one terminal host failure and
 cancels modeled work. The high-priority recovery manager now owns bounded
 running abort and escalation. Management/watchdog resets reconcile an active
 portal command, and the host CQ has tested high/low watermark hysteresis.
-Remaining work is an explicit firmware reset-acknowledgment deadline plus
-bounded overload policy for the firmware slab, task queues, telemetry, and logs.
+Queue/device reset terminal ownership now has an explicit 100 ms virtual-time
+firmware acknowledgment deadline. Missing acknowledgment releases the private
+bridge with saturating evidence and firmware/queue errors, and a clean command
+works after reconfiguration. Management/watchdog serialization and bounded
+overload policy for the firmware slab, task queues, telemetry, and logs remain.

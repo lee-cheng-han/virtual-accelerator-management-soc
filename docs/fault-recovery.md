@@ -83,3 +83,10 @@ callback and before CQ publication. Telemetry records accepted/rejected,
 timeouts, DMA errors, watchdog resets, last reason/error, high water, and
 latency. Reset itself must never clear the evidence needed to diagnose why it
 occurred, except cold destruction as specified in the register map.
+
+Queue/device reset terminal transfer to firmware is independently bounded at
+100 ms of virtual time. Firmware acknowledgment cancels the deadline. If it is
+silent, the endpoint releases private bridge ownership, increments a saturating
+timeout counter, raises firmware and queue errors, and accepts clean work after
+queue reconfiguration. The test withholds the reply and advances the virtual
+clock to 99 ms and then exactly to the deadline; it uses no wall-clock race.

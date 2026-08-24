@@ -188,6 +188,9 @@ def check_management_portal(executable, firmware, temp):
 
 
 def main():
+    skip_management_portal = os.environ.get(
+        "VAMS_SKIP_MANAGEMENT_PORTAL", "0"
+    ) == "1"
     executable = os.environ.get(
         "QEMU_SYSTEM_X86_64", "qemu-system-x86_64"
     )
@@ -200,19 +203,26 @@ def main():
     )
     try:
         executable = MODULE.executable_path(executable)
-        management_executable = MODULE.executable_path(management_executable)
-        if not os.path.isfile(firmware):
-            raise FileNotFoundError(firmware)
+        if not skip_management_portal:
+            management_executable = MODULE.executable_path(
+                management_executable
+            )
+            if not os.path.isfile(firmware):
+                raise FileNotFoundError(firmware)
     except FileNotFoundError as error:
         print(f"QEMU executable not found: {error}", file=sys.stderr)
         return 2
 
     with tempfile.TemporaryDirectory(prefix="vams-ownership-") as temp:
-        try:
-            check_management_portal(management_executable, firmware, temp)
-        except (AssertionError, OSError, RuntimeError) as error:
-            print(f"management portal QTest failed: {error}", file=sys.stderr)
-            return 1
+        if not skip_management_portal:
+            try:
+                check_management_portal(management_executable, firmware, temp)
+            except (AssertionError, OSError, RuntimeError) as error:
+                print(
+                    f"management portal QTest failed: {error}",
+                    file=sys.stderr,
+                )
+                return 1
         socket_path = os.path.join(temp, "command.sock")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(socket_path)
@@ -423,19 +433,77 @@ def main():
             )
             qtest.write32(MODULE.BAR0 + 0x214, 4)
 
-            lost_id = 0xA11CE005
-            lost_cookie = 0x9988776655443322
+            ack_timeout_id = 0xA11CE005
+            ack_timeout_cookie = 0x9988776655443322
+            qtest.write32(MODULE.BAR0 + 0xF14, 1)
             qtest.write(
                 MODULE.SQ_BASE + 4 * MODULE.SUBMISSION.size,
-                MODULE.submission(1, lost_id, lost_cookie),
+                MODULE.submission(
+                    1, ack_timeout_id, ack_timeout_cookie, opcode=1,
+                    source=source, destination=destination,
+                    length=len(payload),
+                ),
             )
             qtest.write32(MODULE.BAR0 + 0x114, 5)
+            raw = receive_exact(connection, MODULE.SUBMISSION.size)
+            if MODULE.SUBMISSION.unpack(raw)[3] != ack_timeout_id:
+                raise AssertionError("reset-ack test submission mismatch")
+            connection.sendall(MODULE.COMPLETION.pack(
+                ack_timeout_id, 0, 0, 0, 0, ack_timeout_cookie, 0
+            ))
+            MODULE.wait_for_engine_busy(qtest)
+            qtest.write32(MODULE.BAR0 + 0x118, 2)
+            reset_result = MODULE.COMPLETION.unpack(
+                receive_exact(connection, MODULE.COMPLETION.size)
+            )
+            if reset_result[:6] != (
+                ack_timeout_id, 5, 22, 0, 0, ack_timeout_cookie
+            ):
+                raise AssertionError(
+                    f"unexpected queue-reset result: {reset_result[:6]}"
+                )
+            qtest.clock_step(99_000_000)
+            if qtest.read32(MODULE.BAR0 + 0x618) != 0:
+                raise AssertionError("reset acknowledgment expired early")
+            qtest.clock_step(1_000_000)
+            if qtest.read32(MODULE.BAR0 + 0x618) != 1:
+                raise AssertionError("reset acknowledgment timeout missing")
+            if qtest.read32(MODULE.BAR0 + 0x024) & 0x60 != 0x60:
+                raise AssertionError("reset acknowledgment error missing")
+
+            MODULE.configure_queues(qtest)
+            recovery_id = 0xA11CE006
+            recovery_cookie = 0xAABBCCDDEEFF0011
+            qtest.write(
+                MODULE.SQ_BASE,
+                MODULE.submission(1, recovery_id, recovery_cookie),
+            )
+            qtest.write32(MODULE.BAR0 + 0x114, 1)
+            raw = receive_exact(connection, MODULE.SUBMISSION.size)
+            if MODULE.SUBMISSION.unpack(raw)[3] != recovery_id:
+                raise AssertionError("post-timeout submission mismatch")
+            connection.sendall(MODULE.COMPLETION.pack(
+                recovery_id, 0, 0, 0, 0, recovery_cookie, 0
+            ))
+            MODULE.wait_for_completion(qtest, 1)
+            MODULE.check_completion(
+                qtest, 0, (recovery_id, 0, 0, 0, 0, recovery_cookie)
+            )
+            qtest.write32(MODULE.BAR0 + 0x214, 1)
+
+            lost_id = 0xA11CE007
+            lost_cookie = 0xBBCCDDEEFF001122
+            qtest.write(
+                MODULE.SQ_BASE + MODULE.SUBMISSION.size,
+                MODULE.submission(1, lost_id, lost_cookie),
+            )
+            qtest.write32(MODULE.BAR0 + 0x114, 2)
             receive_exact(connection, MODULE.SUBMISSION.size)
             connection.close()
             connection = None
-            MODULE.wait_for_completion(qtest, 5)
+            MODULE.wait_for_completion(qtest, 2)
             MODULE.check_completion(
-                qtest, 4, (lost_id, 2, 18, 0, 0, lost_cookie)
+                qtest, 1, (lost_id, 2, 18, 0, 0, lost_cookie)
             )
         except (AssertionError, OSError, RuntimeError) as error:
             print(f"firmware ownership QTest failed: {error}", file=sys.stderr)
@@ -446,7 +514,7 @@ def main():
             listener.close()
             qtest.close()
 
-    print("VAMS firmware-owned portal, cross-reset, abort, and disconnect: PASS")
+    print("VAMS firmware ownership, bounded reset acknowledgment, and disconnect: PASS")
     return 0
 
 

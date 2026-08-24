@@ -62,7 +62,7 @@ VAMS_DEMO_OUTPUT ?=
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
 	fault-injection-smoke \
-	firmware-ownership-smoke \
+	firmware-ownership-smoke firmware-ownership-model-smoke \
 	payload-throughput-smoke \
 	stress-smoke firmware-resource-report stress-qualification \
 	dma-engine-smoke \
@@ -114,6 +114,8 @@ help:
 	  '                   Verify debug faults, checkpoints, and recovery' \
 	  '  make firmware-ownership-smoke' \
 	  '                   Verify result ownership, reset, and disconnect' \
+	  '  make firmware-ownership-model-smoke' \
+	  '                   Run ownership recovery without firmware build inputs' \
 	  '  make payload-throughput-smoke' \
 	  '                   Verify bounded DMA and report virtual throughput' \
 	  '  make stress-smoke Run a short queue/reset/endurance qualification' \
@@ -318,6 +320,11 @@ firmware-ownership-smoke:
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
 	./qemu/tests/qtest/vams-firmware-ownership.py
 
+firmware-ownership-model-smoke:
+	VAMS_SKIP_MANAGEMENT_PORTAL=1 \
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/qtest/vams-firmware-ownership.py
+
 payload-throughput-smoke:
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	./qemu/tests/performance/vams-payload-throughput.py
@@ -422,9 +429,13 @@ qemu-patch-check:
 		exit 2; \
 	}
 	@set -eu; \
+	source=$$(cd "$(QEMU_SRC)" && pwd); \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-	git clone --quiet --no-local "$(QEMU_SRC)" "$$tmp/qemu"; \
+	mkdir "$$tmp/qemu"; \
+	git -C "$$tmp/qemu" init --quiet; \
+	git -C "$$tmp/qemu" fetch --quiet --depth 1 "$$source" HEAD; \
+	git -C "$$tmp/qemu" checkout --quiet --detach FETCH_HEAD; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0001-hw-riscv-add-vams-riscv-machine.patch"; \
 	git -C "$$tmp/qemu" apply \
@@ -495,6 +506,10 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0017-hw-misc-add-vams-bounded-firmware-abort.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0018-hw-misc-add-vams-reset-notification-and-cq-throttling.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0018-hw-misc-add-vams-reset-notification-and-cq-throttling.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0019-hw-misc-bound-firmware-reset-acknowledgment.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

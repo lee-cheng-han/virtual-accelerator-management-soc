@@ -141,8 +141,10 @@ then requires a clean NOP and a second exactly-once trace.
 checks management-portal submission/authorization/result/final framing, payload
 result return, abort request/result framing, firmware-final CQ publication,
 engine-reset reconciliation, management/watchdog-style terminal reset
-notification during active engine work, and a terminal failure when the bridge
-disconnects with owned work. `cq-backpressure-smoke` fills past a configured
+notification during active engine work, queue-reset acknowledgment at 99/100 ms
+of virtual time, clean progress after forced acknowledgment expiry, and a
+terminal failure when the bridge disconnects with owned work.
+`cq-backpressure-smoke` fills past a configured
 4/2 high/low threshold and proves three deterministic throttle/resume cycles,
 exact completions, a peak occupancy of four, and no SQ over-consumption. The
 real dual-QEMU payload test forces an engine hang, verifies

@@ -50,7 +50,9 @@ remain generation-scoped. Firmware now acknowledges and validates running
 results, owns terminal publication, reconciles engine reset, and converts bridge
 disconnect into a terminal failure. The recovery manager now bounds result
 waits, requests abort, waits 100 ms for acknowledgment, and counts/escalates a
-missing result. Six debug-gated one-shot
+missing result. Queue/device reset terminal ownership now has its own 100 ms
+virtual-time acknowledgment deadline with saturating timeout evidence, error
+reporting, migration state, and verified clean progress after expiry. Six debug-gated one-shot
 faults now cover forced timeout, CQ-notification suppression, engine hang,
 directional payload DMA failures, and reset after engine activation. Nth-match
 selection, sticky/saturating evidence, a cold-reset-only lock, engine-start and
@@ -101,8 +103,8 @@ explicitly planned and are not counted as implemented.
 |---|---|---|
 | Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool transitions, running-result identity validation, and exactly-once publication are fail-fast assertions. | Host mapping lifetime and recovery-manager escalation invariants. |
 | Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
-| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Management/watchdog reset sends terminal ownership reconciliation, while the Linux driver programs tested CQ high/low watermarks. | Explicit firmware reset-acknowledgment deadlines and bounded internal firmware-queue overload policy. |
-| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort bounds, escalation counters, bridge-disconnect reconciliation, and management/watchdog terminal reset notification have executable paths. | Reset-acknowledgment escalation and saturated firmware-queue conditions. |
+| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Queue/device reset acknowledgment is bounded at 100 ms; management/watchdog reset sends terminal ownership reconciliation, while the Linux driver programs tested CQ high/low watermarks. | Management/watchdog reset serialization and bounded internal firmware-queue overload policy. |
+| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort and reset-acknowledgment bounds, escalation counters, bridge-disconnect reconciliation, and management/watchdog terminal reset notification have executable paths. | Management/watchdog reset serialization and saturated firmware-queue conditions. |
 | Chunked DMA | Every payload opcode uses 64 KiB chunks; maximum-transfer copy/CRC, cross-boundary fill/vector, directional errors, guards, and v1 completion reporting are tested. | Persisted cancellation points, Nth-chunk faults, and memory-pressure evidence. |
 | Deterministic faults | Six debug-gated PCI faults provide one-shot/Nth-match timeout, IRQ, hang, DMA-read, DMA-write, and active-reset injection; two named checkpoints, evidence persistence, lockout, recovery, and post-fault commands are tested. | Firmware-task hang, mailbox corruption, Nth-chunk failure, and additional ordering checkpoints. |
 | Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
@@ -115,8 +117,8 @@ explicitly planned and are not counted as implemented.
 
 ### Near-term implementation order
 
-1. Finish explicit firmware reset-acknowledgment deadlines and deterministic
-   overload handling for firmware pools, queues, telemetry, and logs.
+1. Finish management/watchdog reset serialization and deterministic overload
+   handling for firmware pools, queues, telemetry, and logs.
 2. Extend the Linux API with registered payload mappings, asynchronous
    submit/wait, `poll`/`epoll`, per-process ownership, and safe close/remove
    cancellation; enforce DMA apertures and privilege boundaries at the same
@@ -148,10 +150,11 @@ queue, result identity validation, deadline-bounded abort request, 100 ms abort
 acknowledgment, escalation counters, terminal transition/publication, reset
 result reconciliation, disconnect terminal completion, management/watchdog
 terminal reset notification, and CQ watermark hysteresis with persistent
-high-water/backpressure evidence.
+high-water/backpressure evidence. Queue/device reset terminal acknowledgment is
+bounded at 100 ms with persistent timeout evidence and clean post-expiry progress.
 
-- Extend the recovery manager to serialize queue, device, watchdog, and bridge
-  generation changes with explicit reset acknowledgment deadlines.
+- Extend the recovery manager to serialize management/watchdog and bridge
+  generation changes; queue/device acknowledgment deadlines are implemented.
 - Extend deterministic overload behavior from the implemented host CQ
   watermarks to full slabs, firmware queues, telemetry, and logs. No
   resource-exhaustion path may block forever or silently discard owned work.

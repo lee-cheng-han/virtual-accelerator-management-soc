@@ -79,7 +79,8 @@ fi
 		--disable-docs --enable-plugins
 )
 
-ninja -C "$build_dir" -j "$jobs"
+ninja -C "$build_dir" -j "$jobs" \
+	qemu-system-riscv32 qemu-system-x86_64
 
 for executable in qemu-system-riscv32 qemu-system-x86_64; do
 	test -x "$build_dir/$executable" || {

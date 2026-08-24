@@ -1,0 +1,185 @@
+From: VAMS contributors <vams@example.com>
+Subject: [PATCH 19/19] hw/misc: bound firmware reset acknowledgment
+
+Start a virtual-time deadline whenever queue or device reset transfers terminal
+ownership to firmware.  If firmware does not acknowledge, release the bridge,
+raise firmware and queue errors, and retain a saturating timeout count so later
+commands and diagnostics are not blocked by a dead management path.
+
+Signed-off-by: VAMS contributors <vams@example.com>
+---
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -27,6 +27,7 @@
+ #define VAMS_MSIX_BAR 1
+ #define VAMS_PCIE_CAP_OFFSET 0x80
+ #define VAMS_DEVICE_RESET_DELAY_MS 1
++#define VAMS_FIRMWARE_RESET_ACK_TIMEOUT_MS 100
+ #define VAMS_NANOSECONDS_PER_MILLISECOND INT64_C(1000000)
+ #define VAMS_ENGINE_EXECUTION_NS \
+     (20 * VAMS_NANOSECONDS_PER_MILLISECOND)
+@@ -77,6 +78,7 @@ enum {
+     VAMS_REG_RESET_REQUEST = 0x60c,
+     VAMS_REG_LAST_RESET_REASON = 0x610,
+     VAMS_REG_RESET_STATUS = 0x614,
++    VAMS_REG_RESET_ACK_TIMEOUT_COUNT = 0x618,
+     VAMS_REG_FAULT_CONTROL = 0xf00,
+     VAMS_REG_FAULT_ARG = 0xf04,
+     VAMS_REG_FAULT_STATUS = 0xf08,
+@@ -107,6 +109,7 @@ enum {
+     VAMS_ERROR_BAD_CONFIG = BIT(3),
+     VAMS_ERROR_DMA = BIT(4),
+     VAMS_ERROR_QUEUE = BIT(5),
++    VAMS_ERROR_FW = BIT(6),
+     VAMS_ERROR_FATAL = BIT(9),
+     VAMS_INTR_CQ = BIT(0),
+     VAMS_INTR_ERROR = BIT(1),
+@@ -155,6 +158,7 @@ struct VamsPcieState {
+     MemoryRegion bar0;
+     QEMUTimer *reset_timer;
+     QEMUTimer *engine_timer;
++    QEMUTimer *firmware_ack_timer;
+ 
+     uint32_t device_status;
+     uint32_t device_control;
+@@ -202,6 +206,7 @@ struct VamsPcieState {
+     uint32_t active_engine_epoch;
+     uint32_t engine_error;
+     uint32_t last_reset_reason;
++    uint32_t reset_ack_timeout_count;
+     bool engine_inflight;
+     bool engine_hung;
+     bool x_vams_debug;
+@@ -636,10 +641,30 @@ static bool vams_pcie_report_engine_result(
+         return false;
+     }
+     qemu_chr_fe_accept_input(&s->command_chr);
++    if (discard) {
++        timer_mod(s->firmware_ack_timer,
++                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
++                  VAMS_FIRMWARE_RESET_ACK_TIMEOUT_MS);
++    }
+     vams_pcie_check_invariants(s);
+     return true;
+ }
+ 
++static void vams_pcie_firmware_ack_timeout(void *opaque)
++{
++    VamsPcieState *s = opaque;
++
++    g_assert(s->bridge_discard_completion);
++    s->bridge_discard_completion = false;
++    s->bridge_completion_pos = 0;
++    s->reset_ack_timeout_count =
++        vams_pcie_sat_inc(s->reset_ack_timeout_count);
++    vams_pcie_set_error(s, VAMS_ERROR_FW | VAMS_ERROR_QUEUE);
++    qemu_chr_fe_accept_input(&s->command_chr);
++    vams_pcie_check_invariants(s);
++    vams_pcie_process_sq(s);
++}
++
+ static void vams_pcie_abort_engine_to_firmware(VamsPcieState *s,
+                                                 uint16_t error_code)
+ {
+@@ -1064,6 +1089,7 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+ 
+     s->bridge_completion_pos = 0;
+     if (s->bridge_discard_completion) {
++        timer_del(s->firmware_ack_timer);
+         s->bridge_discard_completion = false;
+         vams_pcie_check_invariants(s);
+         vams_pcie_process_sq(s);
+@@ -1099,6 +1125,7 @@ static void vams_pcie_bridge_event(void *opaque, QEMUChrEvent event)
+         s->bridge_discard_completion = false;
+         s->bridge_completion_pos = 0;
+         s->bridge_control_pos = 0;
++        timer_del(s->firmware_ack_timer);
+         vams_pcie_set_error(s, VAMS_ERROR_DMA | VAMS_ERROR_QUEUE);
+         if (publish && s->cq_depth && !vams_pcie_cq_full(s)) {
+             struct vams_completion completion = { 0 };
+@@ -1370,6 +1397,8 @@ static uint64_t vams_pcie_bar0_read(void *opaque, hwaddr offset,
+         return s->last_reset_reason;
+     case VAMS_REG_RESET_STATUS:
+         return 0;
++    case VAMS_REG_RESET_ACK_TIMEOUT_COUNT:
++        return s->reset_ack_timeout_count;
+     case VAMS_REG_FAULT_CONTROL:
+         return s->fault_control;
+     case VAMS_REG_FAULT_ARG:
+@@ -1768,15 +1797,33 @@ static const MemoryRegionOps vams_pcie_bar0_ops = {
+     },
+ };
+ 
++static int vams_pcie_post_load(void *opaque, int version_id)
++{
++    VamsPcieState *s = opaque;
++
++    if (version_id < 11) {
++        s->reset_ack_timeout_count = 0;
++        if (s->bridge_discard_completion) {
++            timer_mod(s->firmware_ack_timer,
++                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
++                      VAMS_FIRMWARE_RESET_ACK_TIMEOUT_MS);
++        }
++    }
++    vams_pcie_check_invariants(s);
++    return 0;
++}
++
+ static const VMStateDescription vams_pcie_vmstate = {
+     .name = TYPE_VAMS_PCIE,
+-    .version_id = 10,
++    .version_id = 11,
+     .minimum_version_id = 2,
++    .post_load = vams_pcie_post_load,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VamsPcieState),
+         VMSTATE_MSIX(parent_obj, VamsPcieState),
+         VMSTATE_TIMER_PTR(reset_timer, VamsPcieState),
+         VMSTATE_TIMER_PTR_V(engine_timer, VamsPcieState, 5),
++        VMSTATE_TIMER_PTR_V(firmware_ack_timer, VamsPcieState, 11),
+         VMSTATE_UINT32(device_status, VamsPcieState),
+         VMSTATE_UINT32(device_control, VamsPcieState),
+         VMSTATE_UINT32(error_status, VamsPcieState),
+@@ -1822,6 +1869,7 @@ static const VMStateDescription vams_pcie_vmstate = {
+         VMSTATE_UINT32_V(active_engine_epoch, VamsPcieState, 6),
+         VMSTATE_UINT32_V(engine_error, VamsPcieState, 6),
+         VMSTATE_UINT32_V(last_reset_reason, VamsPcieState, 6),
++        VMSTATE_UINT32_V(reset_ack_timeout_count, VamsPcieState, 11),
+         VMSTATE_BOOL_V(engine_hung, VamsPcieState, 7),
+         VMSTATE_BOOL_V(debug_lock, VamsPcieState, 7),
+         VMSTATE_UINT32_V(fault_control, VamsPcieState, 7),
+@@ -1841,6 +1889,7 @@ static void vams_pcie_reset(DeviceState *dev)
+ 
+     timer_del(s->reset_timer);
+     timer_del(s->engine_timer);
++    timer_del(s->firmware_ack_timer);
+     s->device_status = VAMS_STATUS_READY;
+     s->device_control = 0;
+     s->error_status = 0;
+@@ -1882,6 +1931,7 @@ static void vams_pcie_reset(DeviceState *dev)
+     s->active_engine_epoch = 0;
+     s->engine_error = 0;
+     s->last_reset_reason = VAMS_RESET_REASON_POWER_ON;
++    s->reset_ack_timeout_count = 0;
+     s->engine_inflight = false;
+     s->engine_hung = false;
+     s->debug_lock = false;
+@@ -1955,6 +2005,8 @@ static void vams_pcie_init(Object *obj)
+                                   vams_pcie_reset_complete, s);
+     s->engine_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                    vams_pcie_engine_complete, s);
++    s->firmware_ack_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                         vams_pcie_firmware_ack_timeout, s);
+ }
+ 
+ static void vams_pcie_finalize(Object *obj)
+@@ -1963,6 +2015,7 @@ static void vams_pcie_finalize(Object *obj)
+ 
+     timer_free(s->reset_timer);
+     timer_free(s->engine_timer);
++    timer_free(s->firmware_ack_timer);
+ }
+ 
+ static const Property vams_pcie_properties[] = {

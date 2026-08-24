@@ -149,6 +149,12 @@ At the high threshold the endpoint stops consuming SQ entries; it resumes only
 after the host drains to the low threshold. Peak occupancy and throttle-entry
 count persist across queue/device reset, making overload behavior observable.
 
+When queue or device reset invalidates host-visible ownership during active
+engine work, the private bridge gives firmware 100 ms of virtual time to
+acknowledge the terminal reset result. Expiry clears that private owner, raises
+firmware/queue error evidence, and prevents a silent management path from
+blocking later queue reconfiguration.
+
 ## Recovery hierarchy
 
 Recovery escalates only as far as needed: reject/abort one command, reset queue

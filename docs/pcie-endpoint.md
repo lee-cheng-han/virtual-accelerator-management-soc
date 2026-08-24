@@ -8,7 +8,8 @@ queue. The private dual-QEMU bridge and all firmware-owned v1 payload operations
 now work in integration tests. A virtual-time engine supplies BUSY state,
 deadline completion, bounded payload DMA, reset-safe callback cancellation, and
 engine-only recovery, firmware-issued abort control, management-reset terminal
-notification, and CQ watermark throttling. Host payload UAPI remains
+notification, bounded reset acknowledgment, and CQ watermark throttling. Host
+payload UAPI remains
 unavailable.
 
 The optional `x-vams-debug=true` property exposes deterministic fault and
@@ -97,8 +98,9 @@ active engine command/timer/deadline/generation are migration state. Live
 migration is not an accepted platform feature until an end-to-end migration
 regression exists.
 
-Migration state version 10 includes fault state, bridge control, CQ watermark
-configuration/evidence, debug lock, engine-hung state, and checkpoints. A destination still
+Migration state version 11 includes fault state, bridge control, CQ watermark
+configuration/evidence, the reset-acknowledgment timer/counter, debug lock,
+engine-hung state, and checkpoints. A destination still
 must be launched with a compatible debug property; live migration remains
 outside the accepted feature set.
 
@@ -117,6 +119,14 @@ sets `CQ_STATUS.BACKPRESSURE`, increments a saturating counter, and stops new SQ
 consumption. Draining to the low value clears throttling and resumes work. The
 Linux driver programs 12/8 for its depth-16 queues; the compatibility default
 uses 15/14.
+
+Queue and device reset can transfer an active engine result back to firmware
+after host-visible queue state has already been invalidated. The endpoint waits
+100 ms of virtual time for firmware's terminal acknowledgment. An on-time reply
+cancels the timer; expiry clears the private bridge owner, increments
+`RESET_ACK_TIMEOUT_COUNT`, sets firmware and queue errors, and permits later
+reconfiguration. The timer and evidence are migration state, and older incoming
+state with an outstanding discard receives a fresh bounded deadline.
 
 ## Validation
 
