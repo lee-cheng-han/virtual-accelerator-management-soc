@@ -18,3 +18,11 @@ config VAMS_SCHEDULER_TEST_DELAY_MS
 	help
 	  Delay dispatch to exercise deterministic queued-command expiry. Keep
 	  this zero in the normal firmware configuration.
+
+config VAMS_OVERLOAD_TEST
+	bool "Inject deterministic diagnostic queue pressure"
+	default n
+	help
+	  Fill the bounded event and heartbeat queues before their consumers
+	  start so the overload counters and nonblocking drop policy can be
+	  validated. Keep this disabled in the normal firmware configuration.

@@ -33,6 +33,14 @@ struct vams_command_portal_config {
 	mm_reg_t base;
 };
 
+bool vams_command_pending(const struct device *dev)
+{
+	const struct vams_command_portal_config *config = dev->config;
+
+	return (sys_read32(config->base + VAMS_COMMAND_STATUS) &
+		VAMS_COMMAND_H2F_PENDING) != 0U;
+}
+
 int vams_command_receive(const struct device *dev,
 			 struct vams_submission *submission,
 			 k_timeout_t timeout)

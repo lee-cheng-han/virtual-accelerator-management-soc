@@ -17,10 +17,12 @@ RESOURCE_RE = re.compile(
     r"validation_high=(\d+)/(\d+) ready_high=(\d+)/(\d+) "
     r"running_high=(\d+)/(\d+) "
     r"completion_high=(\d+)/(\d+) recovery_attempts=(\d+) "
-    r"recovery_escalations=(\d+)"
+    r"recovery_escalations=(\d+) admission_defers=(\d+) "
+    r"heartbeat_drops=(\d+) queue_overloads=(\d+) portal_stalls=(\d+) "
+    r"event_drops=(\d+)"
 )
 STACK_RE = re.compile(
-    r"(producer|monitor|mailbox|receiver|validator|scheduler|recovery|completion|health)="
+    r"(producer|monitor|mailbox|receiver|validator|scheduler|recovery|completion|health|event)="
     r"(\d+)/(\d+)"
 )
 WATCHDOG_RE = re.compile(
@@ -78,7 +80,7 @@ def capture(qemu, firmware):
         "",
     )
     stacks = STACK_RE.findall(stack_line)
-    if resources is None or watchdog is None or len(stacks) != 9:
+    if resources is None or watchdog is None or len(stacks) != 10:
         raise AssertionError("firmware resource transcript is incomplete")
 
     values = resources.groups()
@@ -104,7 +106,7 @@ def capture(qemu, firmware):
     if maximum_ms + margin_ms != timeout_ms or margin_ms <= 0:
         raise AssertionError("watchdog margin is not positive and consistent")
     return {
-        "schema": "vams-firmware-resources-v2",
+        "schema": "vams-firmware-resources-v3",
         "result": "PASS",
         "firmware": {
             "path": firmware,
@@ -116,6 +118,13 @@ def capture(qemu, firmware):
         "recovery": {
             "attempts": int(values[12]),
             "escalations": int(values[13]),
+        },
+        "overload": {
+            "admission_defers": int(values[14]),
+            "heartbeat_drops": int(values[15]),
+            "queue_overloads": int(values[16]),
+            "portal_stalls": int(values[17]),
+            "event_drops": int(values[18]),
         },
         "watchdog": {
             "timeout_ms": timeout_ms,

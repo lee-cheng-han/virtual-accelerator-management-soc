@@ -108,7 +108,8 @@ internal management peripheral, not the host datapath.
   reset-generation callback suppression
 - Bounded 64 KiB payload chunks with maximum-transfer integrity and
   virtual-model throughput reporting
-- Fixed eight-object Zephyr command pool with asserted ownership transitions,
+- Fixed eight-object Zephyr command pool with deferred pre-acknowledgment
+  admission, nonblocking handoffs, asserted ownership transitions,
   queued deadlines, reset generations, and exactly-once publication
 - Host-visible engine status/error/epoch state and engine-only reset with a
   terminal reset result, queued-work preservation, and stale-callback rejection

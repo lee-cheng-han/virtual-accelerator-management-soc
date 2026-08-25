@@ -12,6 +12,8 @@ verifies the ordered patch-series SHA-256, applies it only to a recognized clean
 tree, verifies the resulting source-state SHA-256, configures only the RV32 and
 x86-64 system targets, and builds them. A marker in the ignored build directory
 prevents accidental double application while still rejecting changed pins.
+The source fingerprint uses full Git object IDs and a fixed locale, so shallow
+CI checkouts and full developer clones produce the same digest.
 
 The preparation step may access the network to clone QEMU and obtain host build
 dependencies not already available. Re-running against prepared source uses the

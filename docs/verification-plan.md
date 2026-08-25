@@ -152,6 +152,16 @@ acknowledged firmware abort, drops one abort result to verify bounded escalation
 and requires clean progress afterward.
 `firmware-scheduler-unit` compiles the production EDF comparator as strict host
 C and verifies deadline ordering plus FIFO acceptance-sequence tie-breaking.
+`firmware-overload-unit` verifies saturating counter behavior and the
+portal-pending/pool-capacity admission decision as strict host C.
+`firmware-overload-smoke` boots an instrumented Zephyr image that deterministically
+overfills the fixed event and heartbeat queues before their consumers start. It
+requires exact drop counts and subsequent heartbeat progress. The same image
+fills all eight command-slab objects while the first dual-QEMU descriptor is
+pending, verifies eight admission deferrals without portal acknowledgment,
+then releases capacity and completes the full 41/39 command suite. This proves
+diagnostic pressure is counted without blocking correctness tasks and owned
+host work is neither lost nor duplicated under full-slab pressure.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
 `release-input-check` cross-validates centralized source pins, the supported
 interface matrix, and the checked-in million-command evidence. CI additionally

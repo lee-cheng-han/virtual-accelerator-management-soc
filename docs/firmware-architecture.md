@@ -108,14 +108,15 @@ snapshot critical sections. Recovery never waits for a lower-priority task
 while preventing it from running; it posts quiesce, then waits with a bounded
 timeout and yields.
 
-Potential inversion remains when completion is blocked by a full CQ while
-commands occupy the pool. The receiver applies a reserved-capacity watermark:
-it stops SQ capture early enough that every accepted command has a command
-object and a result slot. Watchdog/log/telemetry cannot consume these slots.
-The implemented PCI queue controller additionally applies host-programmed
-high/low CQ watermark hysteresis before the ring becomes full. Extending the
-same deterministic rejection/defer policy to every internal firmware queue is
-the remaining overload task.
+The receiver inspects portal ownership before allocating and never acknowledges
+a descriptor unless a command object is available. A full slab therefore
+defers capture without transferring ownership. Internal command handoffs use
+nonblocking puts: because every downstream queue can hold the entire eight-item
+command pool, failure violates a capacity invariant and fails fast instead of
+deadlocking. Completion publication has a 100 ms bound and requests management
+reset on expiry; watchdog expiry is the one-second reset backstop. The PCI queue
+controller additionally applies host-programmed high/low CQ watermark
+hysteresis before the host ring becomes full.
 
 ## Watchdog and logging
 
@@ -125,6 +126,16 @@ the task is in a declared bounded wait. A debug fault can freeze one epoch.
 Hardware expiry performs management reset, increments generation/reset counter,
 and causes the driver to discard prior-generation requests.
 
-Structured logs contain event ID, severity, command ID when valid, generation,
-timestamp, and two numeric arguments. They contain no host buffer data or raw
-pointers. Logging is diagnostic and never part of correctness.
+Runtime diagnostic producers write fixed-size events to a bounded queue with
+`K_NO_WAIT`; a lower-priority logger owns UART formatting. Queue saturation
+drops only diagnostics and increments a saturating counter, so logging is never
+part of command correctness. Events contain an ID, command ID when valid,
+generation, timestamp, and numeric context, with no host buffer data or raw
+pointers. The later unified-observability work adds severity, engine epoch,
+clock-domain metadata, and cross-layer schema/versioning.
+
+Heartbeat samples use the same nonblocking/drop-accounted policy. Management
+telemetry is written directly to fixed MMIO registers and allocates no queue or
+buffer. Resource evidence reports admission deferrals, heartbeat and event
+drops, internal queue overloads, and completion-portal stalls as saturating
+counters.

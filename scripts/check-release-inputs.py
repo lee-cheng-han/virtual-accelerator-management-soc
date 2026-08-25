@@ -26,6 +26,11 @@ def load_pins():
 
 def main():
     pins = load_pins()
+    prepare_qemu = (ROOT / "scripts/prepare-qemu.sh").read_text(
+        encoding="utf-8"
+    )
+    if "git diff --binary --full-index" not in prepare_qemu:
+        raise AssertionError("QEMU source hash must use full Git object IDs")
     patch_manifest = "".join(
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
         f"{path.relative_to(ROOT)}\n"

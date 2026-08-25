@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
-#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/printk.h>
 
+#include <vams_event.h>
 #include <vams_scheduler.h>
 
 #define VAMS_DEFAULT_TIMEOUT_MS UINT32_C(30000)
@@ -20,13 +19,10 @@ void vams_scheduler_transition(struct vams_command_object *command,
 	__ASSERT_NO_MSG(command != NULL);
 	__ASSERT_NO_MSG(command->state == expected);
 	__ASSERT_NO_MSG(next <= VAMS_COMMAND_CANCELLED);
-	printk("Scheduler: event=transition sequence=%" PRIu32
-	       " command=0x%08" PRIx32 " generation=%" PRIu32
-	       " from=%u to=%u\n",
-	       command->sequence,
-	       sys_le32_to_cpu(command->submission.command_id),
-	       command->generation, (unsigned int)command->state,
-	       (unsigned int)next);
+	vams_event_emit(VAMS_EVENT_TRANSITION,
+			sys_le32_to_cpu(command->submission.command_id),
+			command->generation, command->sequence,
+			(uint32_t)command->state, (uint32_t)next, 0U);
 	command->state = (uint8_t)next;
 }
 
@@ -148,10 +144,8 @@ void vams_scheduler_mark_published(struct vams_command_object *command)
 			command->state == VAMS_COMMAND_CANCELLED);
 	__ASSERT_NO_MSG(command->publication_count == 0U);
 	command->publication_count = 1U;
-	printk("Scheduler: event=published sequence=%" PRIu32
-	       " command=0x%08" PRIx32 " generation=%" PRIu32
-	       " count=%u\n",
-	       command->sequence,
-	       sys_le32_to_cpu(command->submission.command_id),
-	       command->generation, (unsigned int)command->publication_count);
+	vams_event_emit(VAMS_EVENT_PUBLISHED,
+			sys_le32_to_cpu(command->submission.command_id),
+			command->generation, command->sequence,
+			command->publication_count, 0U, 0U);
 }

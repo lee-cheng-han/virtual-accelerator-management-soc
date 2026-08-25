@@ -15,8 +15,8 @@ source_hash()
 {
 	(
 		cd "$source_dir"
-		git diff --binary
-		sha256sum $generated_files
+		LC_ALL=C git diff --binary --full-index
+		LC_ALL=C sha256sum $generated_files
 	) | sha256sum | awk '{print $1}'
 }
 
@@ -66,8 +66,11 @@ else
 	printf '%s %s\n' "$VAMS_QEMU_COMMIT" "$VAMS_QEMU_PATCH_SHA256" >"$marker"
 fi
 
-if [ "$(source_hash)" != "$VAMS_QEMU_SOURCE_SHA256" ]; then
+actual_source_hash=$(source_hash)
+if [ "$actual_source_hash" != "$VAMS_QEMU_SOURCE_SHA256" ]; then
 	echo 'patched QEMU source does not match the pinned source hash' >&2
+	echo "actual:   $actual_source_hash" >&2
+	echo "expected: $VAMS_QEMU_SOURCE_SHA256" >&2
 	exit 1
 fi
 

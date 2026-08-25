@@ -23,7 +23,8 @@ SPEC_DOCS += docs/evidence/stress-qualification.json
 
 SPEC_DOCS += docs/linux-uapi.md
 
-CROSS_COMPILE ?= riscv64-unknown-elf-
+RISCV_GCC := $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null)
+CROSS_COMPILE ?= $(if $(RISCV_GCC),$(patsubst %gcc,%,$(RISCV_GCC)),riscv64-unknown-elf-)
 QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
 QEMU_SYSTEM_X86_64 ?= qemu-system-x86_64
 KERNEL_BUILD ?= /lib/modules/$(shell uname -r)/build
@@ -39,9 +40,11 @@ ZEPHYR_VENV ?= $(CURDIR)/build/zephyr-venv
 ZEPHYR_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr
 ZEPHYR_WATCHDOG_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-watchdog
 ZEPHYR_SCHEDULER_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-scheduler
+ZEPHYR_OVERLOAD_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-overload
 VAMS_ZEPHYR_FIRMWARE ?= $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_SCHEDULER_FIRMWARE ?= $(ZEPHYR_SCHEDULER_BUILD_DIR)/zephyr/zephyr.elf
+VAMS_OVERLOAD_FIRMWARE ?= $(ZEPHYR_OVERLOAD_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_DESCRIPTOR_FUZZ_SEED ?= 0xd35c0123
 VAMS_BAR_FUZZ_SEED ?= 0xba4f0223
 VAMS_FUZZ_ITERATIONS ?= 4096
@@ -55,10 +58,10 @@ VAMS_DEMO_QEMU_RISCV32 ?= $(QEMU_BUILD_DIR)/qemu-system-riscv32
 VAMS_DEMO_QEMU_X86_64 ?= $(QEMU_BUILD_DIR)/qemu-system-x86_64
 VAMS_DEMO_OUTPUT ?=
 
-.PHONY: help check check-docs release-input-check abi-check firmware-scheduler-unit firmware smoke qemu-prepare zephyr-prepare zephyr \
-	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout \
+.PHONY: help check check-docs release-input-check abi-check firmware-scheduler-unit firmware-overload-unit firmware smoke qemu-prepare zephyr-prepare zephyr \
+	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout zephyr-overload \
 	management-smoke management-mmio-smoke \
-	watchdog-smoke command-portal-smoke firmware-command-smoke \
+	watchdog-smoke command-portal-smoke firmware-command-smoke firmware-overload-smoke \
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
 	fault-injection-smoke \
@@ -80,6 +83,8 @@ help:
 	  '  make firmware    Build the RV32 bare-metal firmware' \
 	  '  make firmware-scheduler-unit' \
 	  '                   Verify firmware EDF ordering on the host' \
+	  '  make firmware-overload-unit' \
+	  '                   Verify saturating counters and admission policy' \
 	  '  make smoke       Boot the firmware and verify its UART transcript' \
 	  '  make qemu-prepare Build the exact pinned VAMS QEMU targets' \
 	  '  make zephyr-prepare' \
@@ -97,6 +102,8 @@ help:
 	  '                   Verify the private firmware portal state machine' \
 	  '  make firmware-command-smoke' \
 	  '                   Verify firmware-owned NOP validation and completion' \
+	  '  make firmware-overload-smoke' \
+	  '                   Verify bounded diagnostic overload accounting' \
 	  '  make firmware-pcie-smoke' \
 	  '                   Verify PCI DMA through real Zephyr command handling' \
 	  '  make mem-copy-smoke' \
@@ -148,7 +155,7 @@ help:
 	  '  make demo        Run the offline hardware-free system demonstration' \
 	  '  make clean       Remove generated output'
 
-check: check-docs release-input-check abi-check firmware-scheduler-unit
+check: check-docs release-input-check abi-check firmware-scheduler-unit firmware-overload-unit
 
 check-docs:
 	@set -eu; \
@@ -185,6 +192,13 @@ firmware-scheduler-unit:
 		tests/firmware/test-vams-scheduler.c \
 		-o build/tests/test-vams-scheduler
 	./build/tests/test-vams-scheduler
+
+firmware-overload-unit:
+	@mkdir -p build/tests
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror \
+		-Ifirmware/include tests/firmware/test-vams-overload.c \
+		-o build/tests/test-vams-overload
+	./build/tests/test-vams-overload
 
 firmware:
 	$(MAKE) -C firmware/baremetal CROSS_COMPILE="$(CROSS_COMPILE)"
@@ -263,6 +277,24 @@ zephyr-scheduler-timeout:
 	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
 	cmake --build "$(ZEPHYR_SCHEDULER_BUILD_DIR)"
 
+zephyr-overload:
+	@test -x "$(ZEPHYR_VENV)/bin/python" || { \
+		echo 'Zephyr environment missing; run make zephyr-prepare' >&2; \
+		exit 2; \
+	}
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	ZEPHYR_BASE="$(ZEPHYR_BASE)" \
+	ZEPHYR_TOOLCHAIN_VARIANT=cross-compile \
+	CROSS_COMPILE="$(CROSS_COMPILE)" \
+	cmake --fresh -S firmware -B "$(ZEPHYR_OVERLOAD_BUILD_DIR)" -G Ninja \
+		-DUSE_CCACHE=0 \
+		-DBOARD=vams_riscv \
+		-DBOARD_ROOT="$(CURDIR)/firmware" \
+		-DSOC_ROOT="$(CURDIR)/firmware" \
+		-DEXTRA_CONF_FILE=tests/overload.conf
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	cmake --build "$(ZEPHYR_OVERLOAD_BUILD_DIR)"
+
 management-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
@@ -287,6 +319,16 @@ firmware-command-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
 	./qemu/tests/smoke-vams-firmware-command.sh
+
+firmware-overload-smoke: zephyr-overload
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	VAMS_OVERLOAD_FIRMWARE="$(VAMS_OVERLOAD_FIRMWARE)" \
+	./qemu/tests/smoke-vams-firmware-overload.sh
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
+	./qemu/tests/smoke-vams-firmware-pcie.py \
+		--firmware "$(VAMS_OVERLOAD_FIRMWARE)" \
+		--require-admission-deferral
 
 firmware-pcie-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \

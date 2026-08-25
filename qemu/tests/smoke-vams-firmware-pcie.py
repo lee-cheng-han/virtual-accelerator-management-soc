@@ -222,6 +222,7 @@ def parse_args():
             "build/firmware/zephyr/zephyr/zephyr.elf",
         ),
     )
+    parser.add_argument("--require-admission-deferral", action="store_true")
     return parser.parse_args()
 
 
@@ -962,6 +963,17 @@ def main():
                 print("firmware did not report all expected bridged commands",
                       file=sys.stderr)
                 return_code = 1
+            if (args.require_admission_deferral and
+                    not re.search(
+                        r"Resources: .*pool_high=8/8 .*"
+                        r"admission_defers=8 .*queue_overloads=0 .*"
+                        r"portal_stalls=0",
+                        firmware_output,
+                    )):
+                print(firmware_output, file=sys.stderr)
+                print("firmware did not preserve pending ownership under "
+                      "full-slab pressure", file=sys.stderr)
+                return_code = 1
         if return_code != 0:
             with open(pcie_log_path, "r", encoding="utf-8") as stream:
                 print(stream.read(), file=sys.stderr)
@@ -974,6 +986,8 @@ def main():
     print("VAMS engine recovery: epoch=PASS queued-preservation=PASS "
           "firmware-abort=PASS stale-callback=PASS")
     print("VAMS PCI DMA to Zephyr command bridge: firmware=41 host=39 PASS")
+    if args.require_admission_deferral:
+        print("VAMS full-slab admission deferral: ownership=PASS progress=PASS")
     return 0
 
 
