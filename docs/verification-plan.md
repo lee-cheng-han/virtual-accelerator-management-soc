@@ -162,6 +162,11 @@ pending, verifies eight admission deferrals without portal acknowledgment,
 then releases capacity and completes the full 41/39 command suite. This proves
 diagnostic pressure is counted without blocking correctness tasks and owned
 host work is neither lost nor duplicated under full-slab pressure.
+`firmware-health-smoke` independently freezes all eight essential task epochs,
+requires deterministic stuck-task diagnosis and watchdog reset, validates the
+CRC-protected retained record on reboot, and then requires healthy progress.
+Portable health and retained-record tests cover every selector, counter
+saturation, and partial/corrupt/old record rejection.
 `abi-check` verifies generated headers plus compiled and raw-byte layouts.
 `release-input-check` cross-validates centralized source pins, the supported
 interface matrix, and the checked-in million-command evidence. CI additionally

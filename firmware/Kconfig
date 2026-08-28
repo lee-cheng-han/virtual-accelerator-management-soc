@@ -26,3 +26,11 @@ config VAMS_OVERLOAD_TEST
 	  Fill the bounded event and heartbeat queues before their consumers
 	  start so the overload counters and nonblocking drop policy can be
 	  validated. Keep this disabled in the normal firmware configuration.
+
+config VAMS_HEALTH_TEST
+	bool "Honor the model's test-only task freeze selector"
+	default n
+	help
+	  Freeze one selected essential task on the first boot so per-task health
+	  diagnosis and watchdog recovery can be tested. The selector is ignored
+	  in normal firmware builds.

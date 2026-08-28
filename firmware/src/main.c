@@ -17,9 +17,11 @@
 #include <vams_command.h>
 #include <vams_command_portal.h>
 #include <vams_event.h>
+#include <vams_health.h>
 #include <vams_mailbox.h>
 #include <vams_management.h>
 #include <vams_overload.h>
+#include <vams_retained.h>
 #include <vams_scheduler.h>
 
 #define VAMS_TASK_STACK_SIZE 1024
@@ -37,6 +39,9 @@
 #define VAMS_WATCHDOG_TIMEOUT_MS 1000U
 #define VAMS_ABORT_ACK_TIMEOUT_MS 100U
 #define VAMS_COMPLETION_PUBLISH_TIMEOUT_MS 100U
+#define VAMS_SERVICE_POLL_MS 100U
+#define VAMS_HEALTH_STARTUP_GRACE 2U
+#define VAMS_HEALTH_MISS_LIMIT 2U
 #define VAMS_FIRMWARE_VERSION UINT32_C(0x00010000)
 
 struct vams_heartbeat {
@@ -85,6 +90,11 @@ static struct k_thread vams_event_thread;
 static atomic_t producer_epoch;
 static atomic_t monitor_epoch;
 static atomic_t mailbox_epoch;
+static atomic_t receiver_epoch;
+static atomic_t validator_epoch;
+static atomic_t scheduler_epoch;
+static atomic_t recovery_epoch;
+static atomic_t completion_epoch;
 static atomic_t command_objects_in_use;
 static atomic_t command_pool_high_water;
 static atomic_t validation_queue_high_water;
@@ -98,8 +108,13 @@ static atomic_t heartbeat_drop_count;
 static atomic_t queue_overload_count;
 static atomic_t portal_stall_count;
 static atomic_t overload_reset_requested;
+static atomic_t freeze_triggered;
+static atomic_t health_failure_count;
+static atomic_t health_stuck_task;
 static uint32_t command_generation;
 static uint32_t command_sequence;
+static uint32_t test_freeze_task;
+static uint32_t boot_reset_generation;
 
 extern char _image_ram_start[];
 extern char _image_ram_end[];
@@ -123,6 +138,38 @@ static void vams_saturating_atomic_inc(atomic_t *counter)
 				   (uint32_t)previous))) {
 		previous = atomic_get(counter);
 	}
+}
+
+static void vams_task_progress(atomic_t *epoch,
+			       enum vams_health_task_id task_id)
+{
+	atomic_inc(epoch);
+	if (IS_ENABLED(CONFIG_VAMS_HEALTH_TEST) &&
+	    boot_reset_generation == 0U && test_freeze_task == task_id &&
+	    atomic_cas(&freeze_triggered, 0, 1)) {
+		k_sleep(K_FOREVER);
+	}
+}
+
+static void vams_health_epochs(
+	uint32_t epochs[VAMS_HEALTH_TASK_COUNT])
+{
+	epochs[VAMS_HEALTH_TASK_PRODUCER - 1U] =
+		(uint32_t)atomic_get(&producer_epoch);
+	epochs[VAMS_HEALTH_TASK_MONITOR - 1U] =
+		(uint32_t)atomic_get(&monitor_epoch);
+	epochs[VAMS_HEALTH_TASK_MAILBOX - 1U] =
+		(uint32_t)atomic_get(&mailbox_epoch);
+	epochs[VAMS_HEALTH_TASK_RECEIVER - 1U] =
+		(uint32_t)atomic_get(&receiver_epoch);
+	epochs[VAMS_HEALTH_TASK_VALIDATOR - 1U] =
+		(uint32_t)atomic_get(&validator_epoch);
+	epochs[VAMS_HEALTH_TASK_SCHEDULER - 1U] =
+		(uint32_t)atomic_get(&scheduler_epoch);
+	epochs[VAMS_HEALTH_TASK_RECOVERY - 1U] =
+		(uint32_t)atomic_get(&recovery_epoch);
+	epochs[VAMS_HEALTH_TASK_COMPLETION - 1U] =
+		(uint32_t)atomic_get(&completion_epoch);
 }
 
 static int vams_queue_put(struct k_msgq *queue, const void *data,
@@ -208,6 +255,11 @@ static void vams_event_logger(void *unused1, void *unused2, void *unused3)
 		case VAMS_EVENT_OVERLOAD_TEST:
 			printk("Overload test: event=%" PRIu32 "\n", event.arg0);
 			break;
+		case VAMS_EVENT_HEALTH_STUCK:
+			printk("Health: stuck_task=%" PRIu32
+			       " failures=%" PRIu32 "\n",
+			       event.arg0, event.arg1);
+			break;
 		default:
 			break;
 		}
@@ -233,7 +285,7 @@ static void vams_producer(void *unused1, void *unused2, void *unused3)
 		if (status != 0) {
 			vams_saturating_atomic_inc(&heartbeat_drop_count);
 		}
-		atomic_inc(&producer_epoch);
+		vams_task_progress(&producer_epoch, VAMS_HEALTH_TASK_PRODUCER);
 		sequence++;
 		k_sleep(VAMS_HEARTBEAT_PERIOD);
 	}
@@ -248,11 +300,14 @@ static void vams_monitor(void *unused1, void *unused2, void *unused3)
 	ARG_UNUSED(unused3);
 
 	for (;;) {
-		const int status =
-			k_msgq_get(&vams_heartbeat_queue, &heartbeat, K_FOREVER);
+		const int status = k_msgq_get(&vams_heartbeat_queue, &heartbeat,
+					      K_MSEC(VAMS_SERVICE_POLL_MS));
 
+		vams_task_progress(&monitor_epoch, VAMS_HEALTH_TASK_MONITOR);
+		if (status == -EAGAIN) {
+			continue;
+		}
 		__ASSERT_NO_MSG(status == 0);
-		atomic_inc(&monitor_epoch);
 		vams_event_emit(VAMS_EVENT_HEARTBEAT, 0U, command_generation,
 				heartbeat.sequence, 0U, 0U,
 				(uint64_t)heartbeat.uptime_ms);
@@ -271,7 +326,7 @@ static void vams_mailbox_service(void *unused1, void *unused2, void *unused3)
 
 		status = vams_mailbox_receive(mailbox, &message,
 					      VAMS_MAILBOX_POLL_PERIOD);
-		atomic_inc(&mailbox_epoch);
+		vams_task_progress(&mailbox_epoch, VAMS_HEALTH_TASK_MAILBOX);
 		if (status == -EAGAIN) {
 			continue;
 		}
@@ -298,6 +353,8 @@ static void vams_command_receiver(void *unused1, void *unused2, void *unused3)
 	for (;;) {
 		struct vams_command_object *command;
 		int status;
+
+		vams_task_progress(&receiver_epoch, VAMS_HEALTH_TASK_RECEIVER);
 
 		if (IS_ENABLED(CONFIG_VAMS_OVERLOAD_TEST) &&
 		    !overload_test_complete &&
@@ -356,6 +413,9 @@ static void vams_command_receiver(void *unused1, void *unused2, void *unused3)
 		command_sequence++;
 		vams_scheduler_capture(command, command_generation,
 				       command_sequence, k_uptime_get());
+		vams_retained_note_command(
+			sys_le32_to_cpu(command->submission.command_id),
+			command_generation);
 		status = vams_queue_put(&vams_validation_queue, &command,
 					&validation_queue_high_water);
 		__ASSERT_NO_MSG(status == 0);
@@ -372,7 +432,12 @@ static void vams_command_validator(void *unused1, void *unused2, void *unused3)
 		struct vams_command_object *command;
 		int status;
 
-		status = k_msgq_get(&vams_validation_queue, &command, K_FOREVER);
+		status = k_msgq_get(&vams_validation_queue, &command,
+				    K_MSEC(VAMS_SERVICE_POLL_MS));
+		vams_task_progress(&validator_epoch, VAMS_HEALTH_TASK_VALIDATOR);
+		if (status == -EAGAIN) {
+			continue;
+		}
 		__ASSERT_NO_MSG(status == 0);
 		vams_scheduler_transition(command, VAMS_COMMAND_SUBMITTED,
 					  VAMS_COMMAND_VALIDATING);
@@ -458,8 +523,14 @@ static void vams_command_scheduler(void *unused1, void *unused2, void *unused3)
 		size_t selected;
 		int status;
 
+		vams_task_progress(&scheduler_epoch, VAMS_HEALTH_TASK_SCHEDULER);
+
 		if (ready_count == 0U) {
-			status = k_msgq_get(&vams_ready_queue, &ready[0], K_FOREVER);
+			status = k_msgq_get(&vams_ready_queue, &ready[0],
+					    K_MSEC(VAMS_SERVICE_POLL_MS));
+			if (status == -EAGAIN) {
+				continue;
+			}
 			__ASSERT_NO_MSG(status == 0);
 			ready_count = 1U;
 		}
@@ -519,13 +590,28 @@ static void vams_recovery_manager(void *unused1, void *unused2, void *unused3)
 		uint64_t now_ms;
 		int status;
 
-		status = k_msgq_get(&vams_running_queue, &command, K_FOREVER);
+		status = k_msgq_get(&vams_running_queue, &command,
+				    K_MSEC(VAMS_SERVICE_POLL_MS));
+		vams_task_progress(&recovery_epoch, VAMS_HEALTH_TASK_RECOVERY);
+		if (status == -EAGAIN) {
+			continue;
+		}
 		__ASSERT_NO_MSG(status == 0);
 		now_ms = k_uptime_get();
-		status = vams_command_result_receive(
-			command_portal, &result,
-			command->deadline_ms > now_ms ?
-			K_MSEC(command->deadline_ms - now_ms) : K_NO_WAIT);
+		do {
+			const uint64_t remaining_ms =
+				command->deadline_ms > now_ms ?
+				command->deadline_ms - now_ms : 0U;
+			const uint64_t poll_ms =
+				MIN(remaining_ms, VAMS_SERVICE_POLL_MS);
+
+			status = vams_command_result_receive(
+				command_portal, &result,
+				poll_ms > 0U ? K_MSEC(poll_ms) : K_NO_WAIT);
+			vams_task_progress(&recovery_epoch,
+					   VAMS_HEALTH_TASK_RECOVERY);
+			now_ms = k_uptime_get();
+		} while (status == -EAGAIN && now_ms < command->deadline_ms);
 		if (status == -EAGAIN) {
 			vams_saturating_atomic_inc(&recovery_attempt_count);
 			vams_scheduler_begin_abort(command, k_uptime_get());
@@ -586,7 +672,13 @@ static void vams_command_completion(void *unused1, void *unused2, void *unused3)
 		enum vams_command_state terminal_state;
 		int status;
 
-		status = k_msgq_get(&vams_completion_queue, &command, K_FOREVER);
+		status = k_msgq_get(&vams_completion_queue, &command,
+				    K_MSEC(VAMS_SERVICE_POLL_MS));
+		vams_task_progress(&completion_epoch,
+				   VAMS_HEALTH_TASK_COMPLETION);
+		if (status == -EAGAIN) {
+			continue;
+		}
 		__ASSERT_NO_MSG(status == 0);
 		terminal_state = command->state;
 		status = vams_publish_portal_completion(&command->completion);
@@ -602,6 +694,7 @@ static void vams_command_completion(void *unused1, void *unused2, void *unused3)
 			sys_le16_to_cpu(command->completion.error_code), 0U,
 			sys_le64_to_cpu(command->completion.user_cookie));
 		vams_scheduler_transition(command, terminal_state, VAMS_COMMAND_FREE);
+		vams_retained_clear_command();
 		memset(command, 0, sizeof(*command));
 		k_mem_slab_free(&vams_command_pool, command);
 		atomic_dec(&command_objects_in_use);
@@ -632,7 +725,8 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 	       " recovery_escalations=%" PRId32
 	       " admission_defers=%" PRIu32 " heartbeat_drops=%" PRIu32
 	       " queue_overloads=%" PRIu32 " portal_stalls=%" PRIu32
-	       " event_drops=%" PRIu32 "\n",
+	       " event_drops=%" PRIu32 " health_failures=%" PRIu32
+	       " stuck_task=%" PRIu32 "\n",
 	       static_sram, CONFIG_SRAM_SIZE * 1024U,
 	       (int32_t)atomic_get(&command_pool_high_water),
 	       VAMS_COMMAND_POOL_SIZE,
@@ -649,7 +743,9 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 	       (uint32_t)atomic_get(&heartbeat_drop_count),
 	       (uint32_t)atomic_get(&queue_overload_count),
 	       (uint32_t)atomic_get(&portal_stall_count),
-	       vams_event_drop_count());
+	       vams_event_drop_count(),
+	       (uint32_t)atomic_get(&health_failure_count),
+	       (uint32_t)atomic_get(&health_stuck_task));
 	printk("Stacks: producer=%zu/%zu monitor=%zu/%zu mailbox=%zu/%zu"
 	       " receiver=%zu/%zu validator=%zu/%zu scheduler=%zu/%zu"
 	       " recovery=%zu/%zu completion=%zu/%zu health=%zu/%zu"
@@ -693,10 +789,10 @@ static void vams_report_resources(uint64_t watchdog_max_interval_ms)
 static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 {
 	const struct vams_management_snapshot *boot_snapshot = arg1;
-	atomic_val_t last_producer = atomic_get(&producer_epoch);
-	atomic_val_t last_monitor = atomic_get(&monitor_epoch);
-	atomic_val_t last_mailbox = atomic_get(&mailbox_epoch);
+	uint32_t epochs[VAMS_HEALTH_TASK_COUNT];
+	struct vams_health_tracker tracker;
 	uint32_t heartbeat = 0U;
+	uint32_t reported_failure_count = 0U;
 	bool expiry_announced = false;
 	bool resources_reported = false;
 	uint64_t last_pet_ms = k_uptime_get();
@@ -704,22 +800,29 @@ static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 
 	ARG_UNUSED(unused2);
 	ARG_UNUSED(unused3);
+	vams_health_epochs(epochs);
+	vams_health_tracker_init(&tracker, epochs, VAMS_HEALTH_STARTUP_GRACE,
+				 VAMS_HEALTH_MISS_LIMIT);
 
 	for (;;) {
-		atomic_val_t current_producer;
-		atomic_val_t current_monitor;
-		atomic_val_t current_mailbox;
 		uint64_t uptime_ms;
 		bool healthy;
 
 		k_sleep(VAMS_HEARTBEAT_PERIOD);
 		uptime_ms = k_uptime_get();
-		current_producer = atomic_get(&producer_epoch);
-		current_monitor = atomic_get(&monitor_epoch);
-		current_mailbox = atomic_get(&mailbox_epoch);
-		healthy = (current_producer != last_producer) &&
-			  (current_monitor != last_monitor) &&
-			  (current_mailbox != last_mailbox);
+		vams_health_epochs(epochs);
+		healthy = vams_health_tracker_update(&tracker, epochs);
+		atomic_set(&health_failure_count,
+			   (atomic_val_t)tracker.failure_count);
+		atomic_set(&health_stuck_task, (atomic_val_t)tracker.stuck_task);
+		if (!healthy && tracker.failure_count != reported_failure_count) {
+			reported_failure_count = tracker.failure_count;
+			vams_retained_note_health(tracker.stuck_task,
+						  tracker.failure_count);
+			vams_event_emit(VAMS_EVENT_HEALTH_STUCK, 0U,
+					command_generation, tracker.stuck_task,
+					tracker.failure_count, 0U, 0U);
+		}
 
 		if (healthy) {
 			heartbeat++;
@@ -752,16 +855,14 @@ static void vams_health_monitor(void *arg1, void *unused2, void *unused3)
 			vams_report_resources(watchdog_max_interval_ms);
 			resources_reported = true;
 		}
-
-		last_producer = current_producer;
-		last_monitor = current_monitor;
-		last_mailbox = current_mailbox;
 	}
 }
 
 int main(void)
 {
 	static struct vams_management_snapshot boot_snapshot;
+	struct vams_retained_record retained_snapshot;
+	bool retained_valid;
 	int status;
 
 	printk("Virtual Accelerator Management SoC Zephyr booting\n");
@@ -774,13 +875,33 @@ int main(void)
 
 	vams_management_snapshot(management, &boot_snapshot);
 	command_generation = boot_snapshot.reset_generation;
+	boot_reset_generation = boot_snapshot.reset_generation;
+	test_freeze_task = boot_snapshot.test_freeze_task;
+	retained_valid = vams_retained_boot(management, boot_snapshot.reset_reason,
+					    boot_snapshot.reset_generation);
+	vams_retained_snapshot(&retained_snapshot);
 	printk("Reset: reason=%" PRIu32 " watchdog_count=%" PRIu32
 	       " generation=%" PRIu32 " notifications=%" PRIu32
-	       " notification_failures=%" PRIu32 "\n",
+	       " notification_failures=%" PRIu32 " reset_acks=%" PRIu32
+	       " reset_ack_timeouts=%" PRIu32 " reset_coalesced=%" PRIu32
+	       "\n",
 	       boot_snapshot.reset_reason,
 	       boot_snapshot.watchdog_reset_count,
 	       boot_snapshot.reset_generation, boot_snapshot.reset_notify_count,
-	       boot_snapshot.reset_notify_fail_count);
+	       boot_snapshot.reset_notify_fail_count,
+	       boot_snapshot.reset_ack_count,
+	       boot_snapshot.reset_ack_timeout_count,
+	       boot_snapshot.reset_coalesce_count);
+	printk("Retained: valid=%u boots=%" PRIu32 " reset_reason=%" PRIu32
+	       " generation=%" PRIu32 " stuck_task=%" PRIu32
+	       " health_failures=%" PRIu32 " last_command=0x%08" PRIx32
+	       " events=%" PRIu32 " crc=0x%08" PRIx32 "\n",
+	       retained_valid ? 1U : 0U, retained_snapshot.boot_count,
+	       retained_snapshot.reset_reason, retained_snapshot.reset_generation,
+	       retained_snapshot.last_stuck_task,
+	       retained_snapshot.health_failure_count,
+	       retained_snapshot.last_command_id, retained_snapshot.event_count,
+	       retained_snapshot.crc32);
 	if (boot_snapshot.reset_reason == VAMS_RESET_REASON_WATCHDOG) {
 		printk("Recovery: watchdog reset observed\n");
 	}

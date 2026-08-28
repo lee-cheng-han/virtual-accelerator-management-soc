@@ -1,0 +1,410 @@
+From: VAMS contributors <vams@example.com>
+Subject: [PATCH 20/20] hw/misc: serialize management reset ownership
+
+Hold management and watchdog reset until the PCIe bridge acknowledges its
+terminal completion, with a 100 ms virtual-time deadline and persistent
+success, timeout, and coalescing evidence. Tag the private reset frame so
+engine-reset traffic cannot be mistaken for the management handshake.
+
+Signed-off-by: VAMS contributors <vams@example.com>
+---
+diff --git a/hw/misc/vams_mgmt.c b/hw/misc/vams_mgmt.c
+index 1e2a19c..76ae235 100644
+--- a/hw/misc/vams_mgmt.c
++++ b/hw/misc/vams_mgmt.c
+@@ -74,6 +74,10 @@ enum {
+     VAMS_CONTROL_STATUS = 0x34,
+     VAMS_CONTROL_RESET_NOTIFY_COUNT = 0x38,
+     VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT = 0x3c,
++    VAMS_CONTROL_RESET_ACK_COUNT = 0x40,
++    VAMS_CONTROL_RESET_ACK_TIMEOUT_COUNT = 0x44,
++    VAMS_CONTROL_RESET_PENDING = 0x48,
++    VAMS_CONTROL_RESET_COALESCE_COUNT = 0x4c,
+ };
+ 
+ enum {
+@@ -90,6 +94,8 @@ enum {
+ #define VAMS_WDT_MIN_TIMEOUT_MS 100
+ #define VAMS_WDT_MAX_TIMEOUT_MS 60000
+ #define VAMS_WDT_PET_MAGIC 0x56414d53
++#define VAMS_RESET_ACK_TIMEOUT_MS 100
++#define VAMS_MANAGEMENT_RESET_TAG BIT_ULL(63)
+ #define VAMS_COMMAND_WORDS (VAMS_SUBMISSION_SIZE / sizeof(uint32_t))
+ #define VAMS_COMPLETION_WORDS (VAMS_COMPLETION_SIZE / sizeof(uint32_t))
+ 
+@@ -101,6 +107,7 @@ struct VamsMgmtState {
+     qemu_irq mailbox_irq;
+     qemu_irq reset_out;
+     QEMUTimer *watchdog_timer;
++    QEMUTimer *reset_ack_timer;
+ 
+     uint32_t test_message;
+     uint32_t mailbox_message;
+@@ -119,6 +126,10 @@ struct VamsMgmtState {
+     uint32_t control_status;
+     uint32_t reset_notify_count;
+     uint32_t reset_notify_fail_count;
++    uint32_t reset_ack_count;
++    uint32_t reset_ack_timeout_count;
++    uint32_t reset_coalesce_count;
++    uint32_t pending_reset_reason;
+     uint32_t command_status;
+     uint32_t command_submission[VAMS_COMMAND_WORDS];
+     uint32_t command_completion[VAMS_COMPLETION_WORDS];
+@@ -134,6 +145,8 @@ struct VamsMgmtState {
+     bool command_result_expected;
+     bool command_abort_result_pending;
+     bool command_active;
++    bool reset_pending;
++    bool reset_ack_expected;
+     bool x_drop_abort_result;
+     bool warm_reset_pending;
+ };
+@@ -163,7 +176,9 @@ static void vams_watchdog_reload(VamsMgmtState *s)
+     timer_mod(s->watchdog_timer, deadline);
+ }
+ 
+-static void vams_command_notify_reset(VamsMgmtState *s)
++static void vams_management_finish_reset(VamsMgmtState *s);
++
++static bool vams_command_notify_reset(VamsMgmtState *s)
+ {
+     const struct vams_submission *submission =
+         (const struct vams_submission *)s->command_submission;
+@@ -171,30 +186,37 @@ static void vams_command_notify_reset(VamsMgmtState *s)
+     int written;
+ 
+     if (!s->command_active) {
+-        return;
++        return false;
+     }
+     completion.command_id = submission->command_id;
+     completion.status = cpu_to_le16(VAMS_STATUS_RESET);
+     completion.error_code = cpu_to_le16(VAMS_ERR_RESET);
+     completion.user_cookie = submission->user_cookie;
+     completion.device_timestamp = cpu_to_le64(
+-        qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
++        qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) | VAMS_MANAGEMENT_RESET_TAG);
+     written = qemu_chr_fe_backend_connected(&s->command_chr) ?
+         qemu_chr_fe_write_all(&s->command_chr, (const uint8_t *)&completion,
+                               sizeof(completion)) : -1;
+     if (written == sizeof(completion)) {
+         s->reset_notify_count = vams_sat_inc(s->reset_notify_count);
+         qemu_chr_fe_accept_input(&s->command_chr);
++        return true;
+     } else {
+         s->reset_notify_fail_count =
+             vams_sat_inc(s->reset_notify_fail_count);
+         s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++        return false;
+     }
+ }
+ 
+-static void vams_management_reset(VamsMgmtState *s, uint32_t reason)
++static void vams_management_finish_reset(VamsMgmtState *s)
+ {
+-    vams_command_notify_reset(s);
++    uint32_t reason = s->pending_reset_reason;
++
++    timer_del(s->reset_ack_timer);
++    s->reset_pending = false;
++    s->reset_ack_expected = false;
++    s->pending_reset_reason = VAMS_RESET_REASON_POWER_ON;
+     s->last_reset_reason = reason;
+     s->reset_generation++;
+     s->firmware_heartbeat = 0;
+@@ -217,6 +239,41 @@ static void vams_management_reset(VamsMgmtState *s, uint32_t reason)
+     qemu_irq_pulse(s->reset_out);
+ }
+ 
++static void vams_reset_ack_timeout(void *opaque)
++{
++    VamsMgmtState *s = opaque;
++
++    g_assert(s->reset_pending && s->reset_ack_expected);
++    s->reset_ack_timeout_count = vams_sat_inc(s->reset_ack_timeout_count);
++    s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++    vams_management_finish_reset(s);
++}
++
++static void vams_management_reset(VamsMgmtState *s, uint32_t reason)
++{
++    if (s->reset_pending) {
++        s->reset_coalesce_count = vams_sat_inc(s->reset_coalesce_count);
++        if (reason == VAMS_RESET_REASON_WATCHDOG) {
++            s->pending_reset_reason = reason;
++        }
++        return;
++    }
++
++    timer_del(s->watchdog_timer);
++    s->reset_pending = true;
++    s->pending_reset_reason = reason;
++    if (!s->command_active || !vams_command_notify_reset(s)) {
++        vams_management_finish_reset(s);
++        return;
++    }
++    s->reset_ack_expected = true;
++    s->command_rx_pos = 0;
++    timer_mod(s->reset_ack_timer,
++              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
++              VAMS_RESET_ACK_TIMEOUT_MS);
++    qemu_chr_fe_accept_input(&s->command_chr);
++}
++
+ static uint64_t vams_command_read(void *opaque, hwaddr offset,
+                                   unsigned int size)
+ {
+@@ -266,6 +323,9 @@ static int vams_command_can_receive(void *opaque)
+ {
+     VamsMgmtState *s = opaque;
+ 
++    if (s->reset_ack_expected) {
++        return VAMS_COMPLETION_SIZE - s->command_rx_pos;
++    }
+     if (s->command_result_expected) {
+         if (s->command_status & VAMS_COMMAND_RESULT_PENDING) {
+             return 0;
+@@ -282,7 +342,7 @@ static void vams_command_receive(void *opaque, const uint8_t *buf, int size)
+ {
+     VamsMgmtState *s = opaque;
+ 
+-    uint32_t expected = s->command_result_expected ?
++    uint32_t expected = (s->reset_ack_expected || s->command_result_expected) ?
+                         VAMS_COMPLETION_SIZE : VAMS_SUBMISSION_SIZE;
+ 
+     g_assert(size <= expected - s->command_rx_pos);
+@@ -292,6 +352,28 @@ static void vams_command_receive(void *opaque, const uint8_t *buf, int size)
+         return;
+     }
+ 
++    if (s->reset_ack_expected) {
++        const struct vams_submission *submission =
++            (const struct vams_submission *)s->command_submission;
++        const struct vams_completion *ack =
++            (const struct vams_completion *)s->command_rx;
++        bool valid = ack->command_id == submission->command_id &&
++                     ack->user_cookie == submission->user_cookie &&
++                     le16_to_cpu(ack->status) == VAMS_STATUS_RESET &&
++                     le16_to_cpu(ack->error_code) == VAMS_ERR_RESET;
++
++        s->command_rx_pos = 0;
++        if (valid) {
++            s->reset_ack_count = vams_sat_inc(s->reset_ack_count);
++        } else {
++            s->reset_notify_fail_count =
++                vams_sat_inc(s->reset_notify_fail_count);
++            s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++        }
++        vams_management_finish_reset(s);
++        return;
++    }
++
+     if (s->command_result_expected) {
+         if (s->command_abort_result_pending && s->x_drop_abort_result) {
+             s->command_rx_pos = 0;
+@@ -319,6 +401,11 @@ static void vams_command_write(void *opaque, hwaddr offset, uint64_t value,
+     VamsMgmtState *s = opaque;
+     uint32_t value32 = value;
+ 
++    if (s->reset_pending) {
++        s->command_status |= VAMS_COMMAND_PROTOCOL_ERROR;
++        return;
++    }
++
+     if (offset >= VAMS_COMMAND_SUBMISSION &&
+         offset < VAMS_COMMAND_SUBMISSION + VAMS_SUBMISSION_SIZE) {
+         if (s->command_status & VAMS_COMMAND_H2F_PENDING) {
+@@ -548,6 +635,14 @@ static uint64_t vams_control_read(void *opaque, hwaddr offset,
+         return s->reset_notify_count;
+     case VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT:
+         return s->reset_notify_fail_count;
++    case VAMS_CONTROL_RESET_ACK_COUNT:
++        return s->reset_ack_count;
++    case VAMS_CONTROL_RESET_ACK_TIMEOUT_COUNT:
++        return s->reset_ack_timeout_count;
++    case VAMS_CONTROL_RESET_PENDING:
++        return s->reset_pending;
++    case VAMS_CONTROL_RESET_COALESCE_COUNT:
++        return s->reset_coalesce_count;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       TYPE_VAMS_MGMT ": invalid control read at 0x%" HWADDR_PRIx
+@@ -683,17 +778,26 @@ static int vams_mgmt_post_load(void *opaque, int version_id)
+         s->reset_notify_fail_count = 0;
+         s->command_active = false;
+     }
++    if (version_id < 7) {
++        s->reset_ack_count = 0;
++        s->reset_ack_timeout_count = 0;
++        s->reset_coalesce_count = 0;
++        s->pending_reset_reason = VAMS_RESET_REASON_POWER_ON;
++        s->reset_pending = false;
++        s->reset_ack_expected = false;
++    }
+     vams_mailbox_update_irq(s);
+     return 0;
+ }
+ 
+ static const VMStateDescription vams_mgmt_vmstate = {
+     .name = TYPE_VAMS_MGMT,
+-    .version_id = 6,
++    .version_id = 7,
+     .minimum_version_id = 1,
+     .post_load = vams_mgmt_post_load,
+     .fields = (const VMStateField[]) {
+         VMSTATE_TIMER_PTR(watchdog_timer, VamsMgmtState),
++        VMSTATE_TIMER_PTR_V(reset_ack_timer, VamsMgmtState, 7),
+         VMSTATE_UINT32(mailbox_message, VamsMgmtState),
+         VMSTATE_UINT32(mailbox_response, VamsMgmtState),
+         VMSTATE_UINT32(mailbox_status, VamsMgmtState),
+@@ -710,6 +814,10 @@ static const VMStateDescription vams_mgmt_vmstate = {
+         VMSTATE_UINT32(control_status, VamsMgmtState),
+         VMSTATE_UINT32_V(reset_notify_count, VamsMgmtState, 6),
+         VMSTATE_UINT32_V(reset_notify_fail_count, VamsMgmtState, 6),
++        VMSTATE_UINT32_V(reset_ack_count, VamsMgmtState, 7),
++        VMSTATE_UINT32_V(reset_ack_timeout_count, VamsMgmtState, 7),
++        VMSTATE_UINT32_V(reset_coalesce_count, VamsMgmtState, 7),
++        VMSTATE_UINT32_V(pending_reset_reason, VamsMgmtState, 7),
+         VMSTATE_UINT32_V(command_status, VamsMgmtState, 2),
+         VMSTATE_UINT32_ARRAY_V(command_submission, VamsMgmtState,
+                                VAMS_COMMAND_WORDS, 2),
+@@ -727,6 +835,8 @@ static const VMStateDescription vams_mgmt_vmstate = {
+         VMSTATE_UINT32_V(command_abort_count, VamsMgmtState, 5),
+         VMSTATE_BOOL_V(command_abort_result_pending, VamsMgmtState, 5),
+         VMSTATE_BOOL_V(command_active, VamsMgmtState, 6),
++        VMSTATE_BOOL_V(reset_pending, VamsMgmtState, 7),
++        VMSTATE_BOOL_V(reset_ack_expected, VamsMgmtState, 7),
+         VMSTATE_BOOL_V(x_drop_abort_result, VamsMgmtState, 5),
+         VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
+         VMSTATE_END_OF_LIST()
+@@ -745,6 +855,7 @@ static void vams_mgmt_reset(DeviceState *dev)
+     }
+ 
+     timer_del(s->watchdog_timer);
++    timer_del(s->reset_ack_timer);
+     s->mailbox_message = s->test_message;
+     s->mailbox_response = 0;
+     s->mailbox_status = s->test_message != 0 ? VAMS_MAILBOX_H2F_PENDING : 0;
+@@ -761,6 +872,10 @@ static void vams_mgmt_reset(DeviceState *dev)
+     s->control_status = 0;
+     s->reset_notify_count = 0;
+     s->reset_notify_fail_count = 0;
++    s->reset_ack_count = 0;
++    s->reset_ack_timeout_count = 0;
++    s->reset_coalesce_count = 0;
++    s->pending_reset_reason = VAMS_RESET_REASON_POWER_ON;
+     s->command_status = 0;
+     memset(s->command_submission, 0, sizeof(s->command_submission));
+     memset(s->command_completion, 0, sizeof(s->command_completion));
+@@ -773,6 +888,8 @@ static void vams_mgmt_reset(DeviceState *dev)
+     s->command_result_expected = false;
+     s->command_abort_result_pending = false;
+     s->command_active = false;
++    s->reset_pending = false;
++    s->reset_ack_expected = false;
+     if (s->test_command) {
+         s->command_submission[0] = s->test_command == 2 ? 2 :
+                                    VAMS_DESC_VERSION_1;
+@@ -797,6 +914,8 @@ static void vams_mgmt_realize(DeviceState *dev, Error **errp)
+     }
+     s->watchdog_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                      vams_watchdog_expired, s);
++    s->reset_ack_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                      vams_reset_ack_timeout, s);
+     if (qemu_chr_fe_backend_connected(&s->command_chr)) {
+         qemu_chr_fe_set_handlers(&s->command_chr, vams_command_can_receive,
+                                  vams_command_receive, NULL, NULL, s, NULL,
+@@ -809,6 +928,7 @@ static void vams_mgmt_finalize(Object *obj)
+     VamsMgmtState *s = VAMS_MGMT(obj);
+ 
+     timer_free(s->watchdog_timer);
++    timer_free(s->reset_ack_timer);
+ }
+ 
+ static const Property vams_mgmt_properties[] = {
+diff --git a/hw/misc/vams_pcie.c b/hw/misc/vams_pcie.c
+index f034f27..d2b087d 100644
+--- a/hw/misc/vams_pcie.c
++++ b/hw/misc/vams_pcie.c
+@@ -28,6 +28,7 @@
+ #define VAMS_PCIE_CAP_OFFSET 0x80
+ #define VAMS_DEVICE_RESET_DELAY_MS 1
+ #define VAMS_FIRMWARE_RESET_ACK_TIMEOUT_MS 100
++#define VAMS_MANAGEMENT_RESET_TAG BIT_ULL(63)
+ #define VAMS_NANOSECONDS_PER_MILLISECOND INT64_C(1000000)
+ #define VAMS_ENGINE_EXECUTION_NS \
+     (20 * VAMS_NANOSECONDS_PER_MILLISECOND)
+@@ -1020,6 +1021,28 @@ static int vams_pcie_bridge_can_receive(void *opaque)
+     return VAMS_COMPLETION_SIZE - s->bridge_completion_pos;
+ }
+ 
++static void vams_pcie_ack_management_reset(
++    VamsPcieState *s, const struct vams_completion *completion)
++{
++    int written = qemu_chr_fe_write_all(&s->command_chr,
++                                        (const uint8_t *)completion,
++                                        sizeof(*completion));
++
++    if (written != sizeof(*completion)) {
++        vams_pcie_set_error(s, VAMS_ERROR_FW | VAMS_ERROR_QUEUE);
++    }
++    qemu_chr_fe_accept_input(&s->command_chr);
++}
++
++static bool vams_pcie_is_management_reset(
++    const struct vams_completion *completion)
++{
++    return le16_to_cpu(completion->status) == VAMS_STATUS_RESET &&
++           le16_to_cpu(completion->error_code) == VAMS_ERR_RESET &&
++           (le64_to_cpu(completion->device_timestamp) &
++            VAMS_MANAGEMENT_RESET_TAG) != 0;
++}
++
+ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+                                      int size)
+ {
+@@ -1046,10 +1069,18 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+                     s->bridge_submission.command.user_cookie;
+         if (valid && le16_to_cpu(request->status) == VAMS_STATUS_RESET &&
+             le16_to_cpu(request->error_code) == VAMS_ERR_RESET) {
++            bool management_reset = vams_pcie_is_management_reset(request);
++
+             vams_pcie_cancel_engine(s);
+             s->engine_epoch++;
+             *completion = *request;
++            completion->device_timestamp = cpu_to_le64(
++                le64_to_cpu(completion->device_timestamp) &
++                ~VAMS_MANAGEMENT_RESET_TAG);
+             vams_pcie_publish_completion(s, completion);
++            if (management_reset) {
++                vams_pcie_ack_management_reset(s, request);
++            }
+             return;
+         }
+         valid = valid &&
+@@ -1105,8 +1136,21 @@ static void vams_pcie_bridge_receive(void *opaque, const uint8_t *buf,
+         vams_pcie_schedule_engine(s);
+         return;
+     }
+-    vams_pcie_publish_completion(
+-        s, (const struct vams_completion *)s->bridge_completion);
++    if (vams_pcie_is_management_reset(
++            (const struct vams_completion *)s->bridge_completion)) {
++        struct vams_completion ack =
++            *(const struct vams_completion *)s->bridge_completion;
++
++        ((struct vams_completion *)s->bridge_completion)->device_timestamp =
++            cpu_to_le64(le64_to_cpu(ack.device_timestamp) &
++                        ~VAMS_MANAGEMENT_RESET_TAG);
++        vams_pcie_publish_completion(
++            s, (const struct vams_completion *)s->bridge_completion);
++        vams_pcie_ack_management_reset(s, &ack);
++    } else {
++        vams_pcie_publish_completion(
++            s, (const struct vams_completion *)s->bridge_completion);
++    }
+     vams_pcie_process_sq(s);
+ }
+ 
+

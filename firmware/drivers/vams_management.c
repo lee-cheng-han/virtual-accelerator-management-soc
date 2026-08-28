@@ -29,6 +29,11 @@
 #define VAMS_CONTROL_STATUS 0x34U
 #define VAMS_CONTROL_RESET_NOTIFY_COUNT 0x38U
 #define VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT 0x3cU
+#define VAMS_CONTROL_RESET_ACK_COUNT 0x40U
+#define VAMS_CONTROL_RESET_ACK_TIMEOUT_COUNT 0x44U
+#define VAMS_CONTROL_RESET_COALESCE_COUNT 0x4cU
+#define VAMS_CONTROL_TEST_FREEZE_TASK 0x50U
+#define VAMS_CONTROL_RETENTION_BASE 0x100U
 
 #define VAMS_WDT_ENABLE BIT(0)
 #define VAMS_WDT_PET_MAGIC UINT32_C(0x56414d53)
@@ -110,6 +115,14 @@ void vams_management_snapshot(const struct device *dev,
 		sys_read32(config->base + VAMS_CONTROL_RESET_NOTIFY_COUNT);
 	snapshot->reset_notify_fail_count =
 		sys_read32(config->base + VAMS_CONTROL_RESET_NOTIFY_FAIL_COUNT);
+	snapshot->reset_ack_count =
+		sys_read32(config->base + VAMS_CONTROL_RESET_ACK_COUNT);
+	snapshot->reset_ack_timeout_count =
+		sys_read32(config->base + VAMS_CONTROL_RESET_ACK_TIMEOUT_COUNT);
+	snapshot->reset_coalesce_count =
+		sys_read32(config->base + VAMS_CONTROL_RESET_COALESCE_COUNT);
+	snapshot->test_freeze_task =
+		sys_read32(config->base + VAMS_CONTROL_TEST_FREEZE_TASK);
 	snapshot->mailbox_rx_count =
 		sys_read32(config->base + VAMS_CONTROL_MAILBOX_RX_COUNT);
 	snapshot->mailbox_tx_count =
@@ -126,6 +139,34 @@ void vams_management_reset(const struct device *dev)
 
 	sys_write32(VAMS_RESET_REQUEST_MANAGEMENT,
 		    config->base + VAMS_CONTROL_RESET_REQUEST);
+}
+
+void vams_management_retention_read(const struct device *dev, void *data,
+				    uint32_t length)
+{
+	const struct vams_management_config *config = dev->config;
+	uint32_t *words = data;
+
+	__ASSERT_NO_MSG((length <= VAMS_MANAGEMENT_RETENTION_SIZE) &&
+			(length % sizeof(*words) == 0U));
+	for (uint32_t offset = 0U; offset < length; offset += sizeof(*words)) {
+		words[offset / sizeof(*words)] = sys_read32(
+			config->base + VAMS_CONTROL_RETENTION_BASE + offset);
+	}
+}
+
+void vams_management_retention_write(const struct device *dev,
+				     const void *data, uint32_t length)
+{
+	const struct vams_management_config *config = dev->config;
+	const uint32_t *words = data;
+
+	__ASSERT_NO_MSG((length <= VAMS_MANAGEMENT_RETENTION_SIZE) &&
+			(length % sizeof(*words) == 0U));
+	for (uint32_t offset = 0U; offset < length; offset += sizeof(*words)) {
+		sys_write32(words[offset / sizeof(*words)],
+			    config->base + VAMS_CONTROL_RETENTION_BASE + offset);
+	}
 }
 
 static int vams_management_init(const struct device *dev)

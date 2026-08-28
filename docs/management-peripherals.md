@@ -99,26 +99,38 @@ the bounded escalation path; it defaults off.
 | `0x34` | `STATUS` | RO/W1C | Bit 0 records a rejected write |
 | `0x38` | `RESET_NOTIFY_COUNT` | RO | Accepted active-command reset notifications |
 | `0x3c` | `RESET_NOTIFY_FAIL_COUNT` | RO | Failed active-command reset notifications |
+| `0x40` | `RESET_ACK_COUNT` | RO | Accepted management/watchdog terminal acknowledgments |
+| `0x44` | `RESET_ACK_TIMEOUT_COUNT` | RO | Expired 100 ms terminal-acknowledgment deadlines |
+| `0x48` | `RESET_PENDING` | RO | A management/watchdog reset owns the terminal handshake |
+| `0x4c` | `RESET_COALESCE_COUNT` | RO | Concurrent reset requests merged into a pending reset |
+| `0x50` | `TEST_FREEZE_TASK` | RO | Test-only essential-task selector, zero by default |
+| `0x100–0x17c` | `RETENTION[0..31]` | RW | 128-byte warm-reset-retained firmware crash record window |
 
 The timeout defaults to 5000 ms and accepts values from 100 through 60000 ms
 only while disabled. The firmware configures 1000 ms. Its health task samples
-producer, monitor, and mailbox-service progress epochs every 250 ms. It
-publishes telemetry and pets the watchdog only when every task has advanced.
+eight essential task epochs every 100 ms, applies two startup-grace samples,
+and requires two consecutive misses. It publishes telemetry and pets the
+watchdog only while every required task meets its deadline.
 
-A management or watchdog reset first sends `RESET/RESET` for any command still
-owned by the portal. Successful transport acceptance and failure increment
-separate saturating counters, which survive the warm reset and are reported by
-the next firmware boot. A management reset then restores the ELF-backed SRAM
+A management or watchdog reset first sends a privately tagged `RESET/RESET` for
+any command still owned by the portal. The RV32 reset remains pending until the
+PCI bridge returns the exact command ID, cookie, status, and error, or until a
+100 ms virtual-time deadline expires. Concurrent reset requests coalesce and a
+watchdog reason takes precedence. Success, timeout, and coalescing counters
+survive the warm reset and are reported by the next firmware boot. The reset
+then restores the ELF-backed SRAM
 image and resets the CPU,
 ACLINT, and UART. It clears volatile mailbox and firmware telemetry, while
 preserving reset reason, reset generation, watchdog reset count, mailbox
 counters, watchdog configuration, and diagnostic status. This makes a
 watchdog reboot observable to the next firmware instance without retaining
-mutated RAM-only kernel objects.
+mutated RAM-only kernel objects. The separate retention window survives warm
+reset and migration but clears on cold reset; firmware stores a versioned,
+CRC-protected bounded crash record there.
 
 ## Validation
 
-Five focused tests cover the contract:
+Six focused tests cover the contract:
 
 ```sh
 make management-mmio-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
@@ -126,6 +138,7 @@ make management-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make watchdog-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make command-portal-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 make firmware-command-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
+make firmware-health-smoke QEMU_SYSTEM_RISCV32=/path/to/qemu-system-riscv32
 ```
 
 The QTest smoke checks reset values, W1C acknowledgment, writable timeout, and
@@ -135,7 +148,10 @@ withholds the first pet, requires a second boot with reason 5/count 1, and then
 requires continued healthy telemetry with no assertion or trap report. The
 portal QTest checks ownership, overwrite rejection, sticky diagnostics,
 counters, and exact completion bytes. The firmware test requires exact success
-and unsupported-version completions from Zephyr.
+and unsupported-version completions from Zephyr. The health test freezes each
+of eight essential tasks, checks exact stuck-task evidence, forces watchdog
+recovery, validates the retained record on the second boot, and requires
+post-reset progress.
 
 ## Current limitations
 
@@ -146,6 +162,6 @@ and unsupported-version completions from Zephyr.
   intentionally polling-only.
 - Telemetry reads are individually atomic 32-bit operations; the split uptime
   value does not yet provide a multiword snapshot protocol.
-- Portal state is migration version 6 while earlier management snapshots remain
+- Management state is migration version 8 while earlier snapshots remain
   loadable with empty result state. End-to-end live migration is not yet an
   accepted or tested platform capability.

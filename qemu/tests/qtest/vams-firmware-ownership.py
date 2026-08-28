@@ -25,7 +25,7 @@ class ManagementQTest(MODULE.QTest):
         self.process = subprocess.Popen(
             [
                 executable,
-                "-machine", "vams_riscv",
+                "-machine", "vams_riscv,accel=qtest",
                 "-display", "none",
                 "-monitor", "none",
                 "-serial", "none",
@@ -181,6 +181,47 @@ def check_management_portal(executable, firmware, temp):
         if qtest.read32(0x10020038) != 1 or \
                 qtest.read32(0x1002003C) != 0:
             raise AssertionError("reset notification evidence mismatch")
+        if qtest.read32(0x10020048) != 1 or \
+                qtest.read32(0x10020030) != 0:
+            raise AssertionError("management reset was not held for bridge ack")
+        connection.sendall(MODULE.COMPLETION.pack(*reset_notice))
+        for _ in range(100):
+            if qtest.read32(0x10020030) == 1:
+                break
+        else:
+            raise RuntimeError("management reset did not finish after ack")
+        if qtest.read32(0x10020040) != 1 or \
+                qtest.read32(0x10020044) != 0 or \
+                qtest.read32(0x10020048) != 0:
+            raise AssertionError("reset acknowledgment evidence mismatch")
+
+        timeout_id = reset_id + 1
+        timeout_cookie = reset_cookie + 1
+        timeout_submission = MODULE.submission(
+            1, timeout_id, timeout_cookie, opcode=1, source=0x7000,
+            destination=0x8000, length=64,
+        )
+        connection.sendall(timeout_submission)
+        wait_for_status(qtest, 1)
+        qtest.write32(0x10030008, 1)
+        qtest.write32(0x1002000C, 1)
+        timeout_notice = receive_exact(connection, MODULE.COMPLETION.size)
+        timeout_fields = MODULE.COMPLETION.unpack(timeout_notice)
+        if timeout_fields[:6] != (
+                timeout_id, 5, 21, 0, 0, timeout_cookie):
+            raise AssertionError("reset-timeout notification mismatch")
+        qtest.write32(0x1002000C, 1)
+        if qtest.read32(0x1002004C) != 1:
+            raise AssertionError("concurrent reset was not coalesced")
+        qtest.clock_step(99_000_000)
+        if qtest.read32(0x10020030) != 1 or \
+                qtest.read32(0x10020048) != 1:
+            raise AssertionError("management reset acknowledgment expired early")
+        qtest.clock_step(1_000_000)
+        if qtest.read32(0x10020030) != 2 or \
+                qtest.read32(0x10020044) != 1 or \
+                qtest.read32(0x10020048) != 0:
+            raise AssertionError("bounded management reset timeout missing")
     finally:
         if connection is not None:
             connection.close()
@@ -399,10 +440,14 @@ def main():
                     ))
                     if not reset_ready.wait(timeout=3):
                         raise RuntimeError("management reset was not released")
-                    connection.sendall(MODULE.COMPLETION.pack(
+                    reset = MODULE.COMPLETION.pack(
                         management_reset_id, 5, 21, 0, 0,
-                        management_reset_cookie, 0
-                    ))
+                        management_reset_cookie, 1 << 63
+                    )
+                    connection.sendall(reset)
+                    if receive_exact(connection, MODULE.COMPLETION.size) != \
+                            reset:
+                        raise AssertionError("management reset ack mismatch")
                 except Exception as error:  # Propagate thread failures.
                     errors.append(error)
 

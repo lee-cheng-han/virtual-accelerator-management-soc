@@ -19,7 +19,7 @@ RESOURCE_RE = re.compile(
     r"completion_high=(\d+)/(\d+) recovery_attempts=(\d+) "
     r"recovery_escalations=(\d+) admission_defers=(\d+) "
     r"heartbeat_drops=(\d+) queue_overloads=(\d+) portal_stalls=(\d+) "
-    r"event_drops=(\d+)"
+    r"event_drops=(\d+) health_failures=(\d+) stuck_task=(\d+)"
 )
 STACK_RE = re.compile(
     r"(producer|monitor|mailbox|receiver|validator|scheduler|recovery|completion|health|event)="
@@ -106,7 +106,7 @@ def capture(qemu, firmware):
     if maximum_ms + margin_ms != timeout_ms or margin_ms <= 0:
         raise AssertionError("watchdog margin is not positive and consistent")
     return {
-        "schema": "vams-firmware-resources-v3",
+        "schema": "vams-firmware-resources-v4",
         "result": "PASS",
         "firmware": {
             "path": firmware,
@@ -125,6 +125,10 @@ def capture(qemu, firmware):
             "queue_overloads": int(values[16]),
             "portal_stalls": int(values[17]),
             "event_drops": int(values[18]),
+        },
+        "health": {
+            "failure_count": int(values[19]),
+            "stuck_task": int(values[20]),
         },
         "watchdog": {
             "timeout_ms": timeout_ms,

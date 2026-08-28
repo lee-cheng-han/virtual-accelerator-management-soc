@@ -59,7 +59,9 @@ VALIDATING, scheduler owns QUEUED, the recovery manager owns RUNNING/ABORTING wh
 waiting for the portal, and completion service owns terminal result
 publication. Recovery ownership across reset/watchdog scope now uses terminal
 portal notifications rather than taking other owners' locks;
-explicit firmware acknowledgment deadlines remain planned.
+management/watchdog reset is held pending until the bridge acknowledges the
+tagged terminal result or a separate 100 ms deadline expires. Only then does
+the reset generation advance.
 
 | Shared object | Synchronization | Rule |
 |---|---|---|
@@ -121,10 +123,19 @@ hysteresis before the host ring becomes full.
 ## Watchdog and logging
 
 Every essential task advances a progress epoch at a defined loop boundary.
-Watchdog pets only if required epochs changed within their service interval or
-the task is in a declared bounded wait. A debug fault can freeze one epoch.
+The health policy checks producer, monitor, mailbox, receiver, validator,
+scheduler, recovery, and completion epochs every 100 ms after startup grace.
+Two consecutive misses latch the stable lowest stuck-task ID, increment a
+saturating failure-episode counter, emit a structured event, and withhold the
+watchdog pet. A test-only selector can freeze each epoch independently.
 Hardware expiry performs management reset, increments generation/reset counter,
 and causes the driver to discard prior-generation requests.
+
+Before warm reset, firmware mirrors a bounded record into 128 bytes of modeled
+retained SRAM. Its magic, version, length, and IEEE CRC protect boot/reset
+metadata, stuck-task evidence, last command/generation, reserved assertion and
+stack-failure fields, and four recent events. Invalid, partial, corrupt, or old
+records are reformatted without trusting their contents.
 
 Runtime diagnostic producers write fixed-size events to a bounded queue with
 `K_NO_WAIT`; a lower-priority logger owns UART formatting. Queue saturation

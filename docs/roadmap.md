@@ -103,10 +103,10 @@ explicitly planned and are not counted as implemented.
 |---|---|---|
 | Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool transitions, running-result identity validation, and exactly-once publication are fail-fast assertions. | Host mapping lifetime and recovery-manager escalation invariants. |
 | Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
-| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Descriptor capture defers without acknowledgment when the slab is full; internal handoffs are nonblocking capacity invariants; completion publication, queue/device reset acknowledgment, and recovery waits are bounded. Management/watchdog reset sends terminal ownership reconciliation, while the Linux driver programs tested CQ high/low watermarks. | Management/watchdog reset serialization. |
-| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort, completion-publication, and reset-acknowledgment bounds, saturating escalation/overload counters, bridge-disconnect reconciliation, and management/watchdog terminal reset notification have executable paths. | Management/watchdog reset serialization. |
+| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Descriptor capture defers without acknowledgment when the slab is full; internal handoffs are nonblocking capacity invariants; completion publication, queue/device reset acknowledgment, management/watchdog reset serialization, and recovery waits are bounded. The Linux driver programs tested CQ high/low watermarks. | Extend ownership and cancellation across the public asynchronous Linux API. |
+| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort, completion-publication, and reset-acknowledgment bounds, saturating escalation/overload counters, bridge-disconnect reconciliation, and serialized management/watchdog terminal reset notification have executable paths. | Cross-process removal and host lifecycle recovery. |
 | Chunked DMA | Every payload opcode uses 64 KiB chunks; maximum-transfer copy/CRC, cross-boundary fill/vector, directional errors, guards, and v1 completion reporting are tested. | Persisted cancellation points, Nth-chunk faults, and memory-pressure evidence. |
-| Deterministic faults | Six debug-gated PCI faults provide one-shot/Nth-match timeout, IRQ, hang, DMA-read, DMA-write, and active-reset injection; two named checkpoints, evidence persistence, lockout, recovery, and post-fault commands are tested. | Firmware-task hang, mailbox corruption, Nth-chunk failure, and additional ordering checkpoints. |
+| Deterministic faults | Six debug-gated PCI faults provide one-shot/Nth-match timeout, IRQ, hang, DMA-read, DMA-write, and active-reset injection; test-only injection independently freezes all eight essential firmware tasks; two named checkpoints, evidence persistence, lockout, recovery, and post-fault commands are tested. | Mailbox corruption, Nth-chunk failure, and additional ordering checkpoints. |
 | Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
 | Memory-order verification | Queue transport documents host/device ownership and QEMU DMA ordering; model and integration tests exercise the normal publication chain. | Independently delayed release/acquire checkpoints from descriptor write through CQ visibility, interrupt, and host consumption. |
 | Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
@@ -117,20 +117,18 @@ explicitly planned and are not counted as implemented.
 
 ### Near-term implementation order
 
-1. Finish management/watchdog reset serialization now that deterministic
-   firmware pool, queue, telemetry, and log overload handling is implemented.
-2. Extend the Linux API with registered payload mappings, asynchronous
+1. Extend the Linux API with registered payload mappings, asynchronous
    submit/wait, `poll`/`epoll`, per-process ownership, and safe close/remove
    cancellation; enforce DMA apertures and privilege boundaries at the same
    time.
-3. Add independently controlled memory-order tests and the merged structured
+2. Add independently controlled memory-order tests and the merged structured
    trace needed to diagnose failures across firmware, QEMU, kernel, and
    userspace.
-4. Extend the million-command/reset/endurance qualification with
+3. Extend the million-command/reset/endurance qualification with
    concurrent-process, process-exit, memory-pressure, and long-duration
    watchdog runs while collecting worst-case recovery evidence and enforcing
    regression floors against the new rebuilt-image resource baseline.
-5. Finish hash-locking the build matrix, enable sanitizers/static analysis and
+4. Finish hash-locking the build matrix, enable sanitizers/static analysis and
    coverage-guided fuzzing, generate the requirements-to-evidence matrix, and
    compose the reproducible Linux guest/public UAPI into the existing
    hardware-free `make demo` report.
@@ -152,13 +150,14 @@ result reconciliation, disconnect terminal completion, management/watchdog
 terminal reset notification, and CQ watermark hysteresis with persistent
 high-water/backpressure evidence. Queue/device reset terminal acknowledgment is
 bounded at 100 ms with persistent timeout evidence and clean post-expiry
-progress. Firmware capture defers before acknowledgment when its slab is full,
+progress. Management/watchdog reset now holds the RV32 warm reset until the
+bridge acknowledges the exact tagged terminal result or its independent 100 ms
+deadline expires; concurrent requests coalesce with watchdog reason priority.
+Firmware capture defers before acknowledgment when its slab is full,
 all owned-command queue handoffs are nonblocking capacity invariants, heartbeat
 and diagnostic saturation is explicitly counted, and completion-portal stalls
 request reset after 100 ms with the watchdog as a backstop.
 
-- Extend the recovery manager to serialize management/watchdog and bridge
-  generation changes; queue/device acknowledgment deadlines are implemented.
 Acceptance requires firmware ownership from descriptor capture through terminal
 acknowledgment, bounded recovery at every scope, no command with two owners, no
 lost or duplicate result, and clean progress after engine timeout, queue reset,
@@ -178,15 +177,18 @@ a development baseline, not yet the pinned-runner worst-case acceptance record.
 - Run worst-case command, fault, overload, and recovery workloads; capture all
   task, ISR, main, and idle stack high-water values; justify each configured
   stack with a documented safety margin and enforce a regression floor in CI.
-- Extend watchdog policy with per-task deadlines, startup/recovery grace periods,
-  stuck-task identity, consecutive-failure thresholds, pet jitter, saturating
-  counters, and tests for each independently frozen task.
+- Per-task health deadlines, startup grace, stable stuck-task identity,
+  consecutive-failure thresholds, and saturating episode counters are
+  implemented and tested by independently freezing each of eight essential
+  tasks. Pet-jitter qualification remains.
 - Add versioned, bounded, nonblocking structured firmware events with severity,
   command identity, generation, engine epoch, state transition, timestamp/clock
   domain, queue indices, error context, and explicit drop accounting.
-- Model retained SRAM or nonvolatile storage for boot count, reset cause, last
-  assertion, last active command, stack failure, generations, bounded recent
-  events, record version, and CRC. Test partial, corrupt, and old records.
+- A 128-byte QEMU retained-SRAM window now preserves a versioned CRC record with
+  boot/reset state, stuck-task evidence, last active command, assertion/stack
+  fields, and four recent events across warm reset. Portable tests reject
+  partial, corrupt, wrong-length, and old-version records. Assertion and stack
+  fault capture into the reserved fields remains.
 - Add Zephyr `ztest` or portable host tests for validation precedence, timeout
   wraparound, EDF/FIFO order, ownership transitions, recovery escalation,
   watchdog policy, mailbox parsing, telemetry encoding, and persistent records.

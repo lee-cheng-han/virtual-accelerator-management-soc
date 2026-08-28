@@ -8,7 +8,9 @@ target_include_directories(app PRIVATE include)
 target_sources(app PRIVATE
   src/main.c
   src/command/vams_command.c
+  src/health/vams_health.c
   src/logging/vams_event.c
+  src/recovery/vams_retained.c
   src/scheduler/vams_scheduler.c
   drivers/vams_command_portal.c
   drivers/vams_mailbox.c

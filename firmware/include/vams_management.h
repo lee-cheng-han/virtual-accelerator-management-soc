@@ -8,6 +8,8 @@
 
 #include <zephyr/device.h>
 
+#define VAMS_MANAGEMENT_RETENTION_SIZE 128U
+
 #define VAMS_RESET_REASON_POWER_ON UINT32_C(0)
 #define VAMS_RESET_REASON_FIRMWARE UINT32_C(4)
 #define VAMS_RESET_REASON_WATCHDOG UINT32_C(5)
@@ -18,6 +20,10 @@ struct vams_management_snapshot {
 	uint32_t reset_generation;
 	uint32_t reset_notify_count;
 	uint32_t reset_notify_fail_count;
+	uint32_t reset_ack_count;
+	uint32_t reset_ack_timeout_count;
+	uint32_t reset_coalesce_count;
+	uint32_t test_freeze_task;
 	uint32_t mailbox_rx_count;
 	uint32_t mailbox_tx_count;
 	uint32_t status;
@@ -32,5 +38,9 @@ void vams_management_publish(const struct device *dev, uint32_t heartbeat,
 void vams_management_snapshot(const struct device *dev,
 			      struct vams_management_snapshot *snapshot);
 void vams_management_reset(const struct device *dev);
+void vams_management_retention_read(const struct device *dev, void *data,
+				    uint32_t length);
+void vams_management_retention_write(const struct device *dev,
+				     const void *data, uint32_t length);
 
 #endif /* VAMS_MANAGEMENT_H */

@@ -299,11 +299,10 @@ scaffolding and gain tracked files only when their components are built.
 - The endpoint retains a direct validator only for isolated QTests; integrated
   NOP and all four v1 payload commands use real Zephyr validation.
 - Firmware owns commands from capture through terminal publication, including
-  engine results, bounded abort and reset acknowledgment, and missing-result
-  escalation. Management/watchdog reset serialization remains future work.
-- Fault injection currently targets the PCI queue, engine, DMA, and interrupt
-  model. Firmware-task hang and mailbox-corruption injection remain planned
-  cross-subsystem extensions.
+  engine results, bounded abort and reset acknowledgment, missing-result
+  escalation, and management/watchdog reset serialization.
+- Fault injection targets the PCI queue, engine, DMA, interrupt model, and each
+  essential firmware task. Mailbox-corruption injection remains planned.
 - The public host API currently exposes device information and synchronous NOP;
   payload mapping and asynchronous userspace submission remain future work.
 - The provisional development PCI ID is not allocated for production use.

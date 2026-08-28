@@ -1,0 +1,135 @@
+From: VAMS contributors <vams@example.com>
+Subject: [PATCH 21/21] hw/misc: retain firmware health evidence
+
+Expose a test-only essential-task freeze selector and a 128-byte retained
+control window. Preserve the window across management and watchdog warm
+resets, migrate it with the device, and clear it on cold reset so firmware can
+record CRC-protected crash evidence under the hardware-free QEMU platform.
+
+Signed-off-by: VAMS contributors <vams@example.com>
+---
+diff --git a/hw/misc/vams_mgmt.c b/hw/misc/vams_mgmt.c
+index 76ae235..4482d76 100644
+--- a/hw/misc/vams_mgmt.c
++++ b/hw/misc/vams_mgmt.c
+@@ -78,6 +78,7 @@ enum {
+     VAMS_CONTROL_RESET_ACK_TIMEOUT_COUNT = 0x44,
+     VAMS_CONTROL_RESET_PENDING = 0x48,
+     VAMS_CONTROL_RESET_COALESCE_COUNT = 0x4c,
++    VAMS_CONTROL_TEST_FREEZE_TASK = 0x50,
+ };
+ 
+ enum {
+@@ -96,6 +97,10 @@ enum {
+ #define VAMS_WDT_PET_MAGIC 0x56414d53
+ #define VAMS_RESET_ACK_TIMEOUT_MS 100
+ #define VAMS_MANAGEMENT_RESET_TAG BIT_ULL(63)
++#define VAMS_CONTROL_RETENTION_BASE 0x100
++#define VAMS_CONTROL_RETENTION_SIZE 0x80
++#define VAMS_CONTROL_RETENTION_WORDS \
++    (VAMS_CONTROL_RETENTION_SIZE / sizeof(uint32_t))
+ #define VAMS_COMMAND_WORDS (VAMS_SUBMISSION_SIZE / sizeof(uint32_t))
+ #define VAMS_COMPLETION_WORDS (VAMS_COMPLETION_SIZE / sizeof(uint32_t))
+ 
+@@ -139,6 +144,8 @@ struct VamsMgmtState {
+     uint32_t command_result_count;
+     uint32_t command_abort_count;
+     uint32_t test_command;
++    uint32_t test_freeze_task;
++    uint32_t retention[VAMS_CONTROL_RETENTION_WORDS];
+     CharFrontend command_chr;
+     uint8_t command_rx[VAMS_SUBMISSION_SIZE];
+     uint32_t command_rx_pos;
+@@ -606,6 +613,12 @@ static uint64_t vams_control_read(void *opaque, hwaddr offset,
+ {
+     VamsMgmtState *s = opaque;
+ 
++    if (offset >= VAMS_CONTROL_RETENTION_BASE &&
++        offset < VAMS_CONTROL_RETENTION_BASE + VAMS_CONTROL_RETENTION_SIZE) {
++        return s->retention[(offset - VAMS_CONTROL_RETENTION_BASE) /
++                            sizeof(uint32_t)];
++    }
++
+     switch (offset) {
+     case VAMS_CONTROL_WDT_TIMEOUT_MS:
+         return s->watchdog_timeout_ms;
+@@ -643,6 +656,8 @@ static uint64_t vams_control_read(void *opaque, hwaddr offset,
+         return s->reset_pending;
+     case VAMS_CONTROL_RESET_COALESCE_COUNT:
+         return s->reset_coalesce_count;
++    case VAMS_CONTROL_TEST_FREEZE_TASK:
++        return s->test_freeze_task;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       TYPE_VAMS_MGMT ": invalid control read at 0x%" HWADDR_PRIx
+@@ -657,6 +672,13 @@ static void vams_control_write(void *opaque, hwaddr offset, uint64_t value,
+     VamsMgmtState *s = opaque;
+     uint32_t value32 = value;
+ 
++    if (offset >= VAMS_CONTROL_RETENTION_BASE &&
++        offset < VAMS_CONTROL_RETENTION_BASE + VAMS_CONTROL_RETENTION_SIZE) {
++        s->retention[(offset - VAMS_CONTROL_RETENTION_BASE) /
++                     sizeof(uint32_t)] = value32;
++        return;
++    }
++
+     switch (offset) {
+     case VAMS_CONTROL_WDT_TIMEOUT_MS:
+         if ((s->watchdog_control & VAMS_WDT_ENABLE) != 0 ||
+@@ -786,13 +808,16 @@ static int vams_mgmt_post_load(void *opaque, int version_id)
+         s->reset_pending = false;
+         s->reset_ack_expected = false;
+     }
++    if (version_id < 8) {
++        memset(s->retention, 0, sizeof(s->retention));
++    }
+     vams_mailbox_update_irq(s);
+     return 0;
+ }
+ 
+ static const VMStateDescription vams_mgmt_vmstate = {
+     .name = TYPE_VAMS_MGMT,
+-    .version_id = 7,
++    .version_id = 8,
+     .minimum_version_id = 1,
+     .post_load = vams_mgmt_post_load,
+     .fields = (const VMStateField[]) {
+@@ -837,6 +862,8 @@ static const VMStateDescription vams_mgmt_vmstate = {
+         VMSTATE_BOOL_V(command_active, VamsMgmtState, 6),
+         VMSTATE_BOOL_V(reset_pending, VamsMgmtState, 7),
+         VMSTATE_BOOL_V(reset_ack_expected, VamsMgmtState, 7),
++        VMSTATE_UINT32_ARRAY_V(retention, VamsMgmtState,
++                               VAMS_CONTROL_RETENTION_WORDS, 8),
+         VMSTATE_BOOL_V(x_drop_abort_result, VamsMgmtState, 5),
+         VMSTATE_BOOL(warm_reset_pending, VamsMgmtState),
+         VMSTATE_END_OF_LIST()
+@@ -890,6 +917,7 @@ static void vams_mgmt_reset(DeviceState *dev)
+     s->command_active = false;
+     s->reset_pending = false;
+     s->reset_ack_expected = false;
++    memset(s->retention, 0, sizeof(s->retention));
+     if (s->test_command) {
+         s->command_submission[0] = s->test_command == 2 ? 2 :
+                                    VAMS_DESC_VERSION_1;
+@@ -912,6 +940,10 @@ static void vams_mgmt_realize(DeviceState *dev, Error **errp)
+         error_setg(errp, "test-command must be 0, 1, or 2");
+         return;
+     }
++    if (s->test_freeze_task > 8) {
++        error_setg(errp, "test-freeze-task must be in the range 0..8");
++        return;
++    }
+     s->watchdog_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                      vams_watchdog_expired, s);
+     s->reset_ack_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+@@ -934,6 +966,8 @@ static void vams_mgmt_finalize(Object *obj)
+ static const Property vams_mgmt_properties[] = {
+     DEFINE_PROP_UINT32("test-message", VamsMgmtState, test_message, 0),
+     DEFINE_PROP_UINT32("test-command", VamsMgmtState, test_command, 0),
++    DEFINE_PROP_UINT32("x-test-freeze-task", VamsMgmtState,
++                       test_freeze_task, 0),
+     DEFINE_PROP_CHR("command-chardev", VamsMgmtState, command_chr),
+     DEFINE_PROP_BOOL("x-drop-abort-result", VamsMgmtState,
+                      x_drop_abort_result, false),
+
+

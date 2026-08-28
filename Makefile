@@ -41,10 +41,12 @@ ZEPHYR_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr
 ZEPHYR_WATCHDOG_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-watchdog
 ZEPHYR_SCHEDULER_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-scheduler
 ZEPHYR_OVERLOAD_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-overload
+ZEPHYR_HEALTH_BUILD_DIR ?= $(CURDIR)/build/firmware/zephyr-health
 VAMS_ZEPHYR_FIRMWARE ?= $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_WATCHDOG_FIRMWARE ?= $(ZEPHYR_WATCHDOG_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_SCHEDULER_FIRMWARE ?= $(ZEPHYR_SCHEDULER_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_OVERLOAD_FIRMWARE ?= $(ZEPHYR_OVERLOAD_BUILD_DIR)/zephyr/zephyr.elf
+VAMS_HEALTH_FIRMWARE ?= $(ZEPHYR_HEALTH_BUILD_DIR)/zephyr/zephyr.elf
 VAMS_DESCRIPTOR_FUZZ_SEED ?= 0xd35c0123
 VAMS_BAR_FUZZ_SEED ?= 0xba4f0223
 VAMS_FUZZ_ITERATIONS ?= 4096
@@ -58,10 +60,10 @@ VAMS_DEMO_QEMU_RISCV32 ?= $(QEMU_BUILD_DIR)/qemu-system-riscv32
 VAMS_DEMO_QEMU_X86_64 ?= $(QEMU_BUILD_DIR)/qemu-system-x86_64
 VAMS_DEMO_OUTPUT ?=
 
-.PHONY: help check check-docs release-input-check abi-check firmware-scheduler-unit firmware-overload-unit firmware smoke qemu-prepare zephyr-prepare zephyr \
-	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout zephyr-overload \
+.PHONY: help check check-docs release-input-check abi-check firmware-scheduler-unit firmware-overload-unit firmware-health-unit firmware-retained-unit firmware smoke qemu-prepare zephyr-prepare zephyr \
+	zephyr-smoke zephyr-watchdog zephyr-scheduler-timeout zephyr-overload zephyr-health \
 	management-smoke management-mmio-smoke \
-	watchdog-smoke command-portal-smoke firmware-command-smoke firmware-overload-smoke \
+	watchdog-smoke command-portal-smoke firmware-command-smoke firmware-overload-smoke firmware-health-smoke \
 	firmware-pcie-smoke mem-copy-smoke mem-fill-smoke crc32-smoke \
 	vector-add-smoke async-engine-smoke scheduler-recovery-smoke \
 	fault-injection-smoke \
@@ -85,6 +87,10 @@ help:
 	  '                   Verify firmware EDF ordering on the host' \
 	  '  make firmware-overload-unit' \
 	  '                   Verify saturating counters and admission policy' \
+	  '  make firmware-health-unit' \
+	  '                   Verify per-task deadline and stuck-task policy' \
+	  '  make firmware-retained-unit' \
+	  '                   Verify retained-record version and CRC handling' \
 	  '  make smoke       Boot the firmware and verify its UART transcript' \
 	  '  make qemu-prepare Build the exact pinned VAMS QEMU targets' \
 	  '  make zephyr-prepare' \
@@ -104,6 +110,8 @@ help:
 	  '                   Verify firmware-owned NOP validation and completion' \
 	  '  make firmware-overload-smoke' \
 	  '                   Verify bounded diagnostic overload accounting' \
+	  '  make firmware-health-smoke' \
+	  '                   Freeze each essential task and verify recovery' \
 	  '  make firmware-pcie-smoke' \
 	  '                   Verify PCI DMA through real Zephyr command handling' \
 	  '  make mem-copy-smoke' \
@@ -155,7 +163,8 @@ help:
 	  '  make demo        Run the offline hardware-free system demonstration' \
 	  '  make clean       Remove generated output'
 
-check: check-docs release-input-check abi-check firmware-scheduler-unit firmware-overload-unit
+check: check-docs release-input-check abi-check firmware-scheduler-unit \
+	firmware-overload-unit firmware-health-unit firmware-retained-unit
 
 check-docs:
 	@set -eu; \
@@ -199,6 +208,22 @@ firmware-overload-unit:
 		-Ifirmware/include tests/firmware/test-vams-overload.c \
 		-o build/tests/test-vams-overload
 	./build/tests/test-vams-overload
+
+firmware-health-unit:
+	@mkdir -p build/tests
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror \
+		-Ifirmware/include tests/firmware/test-vams-health.c \
+		firmware/src/health/vams_health.c \
+		-o build/tests/test-vams-health
+	./build/tests/test-vams-health
+
+firmware-retained-unit:
+	@mkdir -p build/tests
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror \
+		-Ifirmware/include tests/firmware/test-vams-retained.c \
+		firmware/src/recovery/vams_retained.c \
+		-o build/tests/test-vams-retained
+	./build/tests/test-vams-retained
 
 firmware:
 	$(MAKE) -C firmware/baremetal CROSS_COMPILE="$(CROSS_COMPILE)"
@@ -295,6 +320,24 @@ zephyr-overload:
 	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
 	cmake --build "$(ZEPHYR_OVERLOAD_BUILD_DIR)"
 
+zephyr-health:
+	@test -x "$(ZEPHYR_VENV)/bin/python" || { \
+		echo 'Zephyr environment missing; run make zephyr-prepare' >&2; \
+		exit 2; \
+	}
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	ZEPHYR_BASE="$(ZEPHYR_BASE)" \
+	ZEPHYR_TOOLCHAIN_VARIANT=cross-compile \
+	CROSS_COMPILE="$(CROSS_COMPILE)" \
+	cmake --fresh -S firmware -B "$(ZEPHYR_HEALTH_BUILD_DIR)" -G Ninja \
+		-DUSE_CCACHE=0 \
+		-DBOARD=vams_riscv \
+		-DBOARD_ROOT="$(CURDIR)/firmware" \
+		-DSOC_ROOT="$(CURDIR)/firmware" \
+		-DEXTRA_CONF_FILE=tests/health.conf
+	PATH="$(ZEPHYR_VENV)/bin:$$PATH" \
+	cmake --build "$(ZEPHYR_HEALTH_BUILD_DIR)"
+
 management-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
 	VAMS_ZEPHYR_FIRMWARE="$(VAMS_ZEPHYR_FIRMWARE)" \
@@ -329,6 +372,11 @@ firmware-overload-smoke: zephyr-overload
 	./qemu/tests/smoke-vams-firmware-pcie.py \
 		--firmware "$(VAMS_OVERLOAD_FIRMWARE)" \
 		--require-admission-deferral
+
+firmware-health-smoke: zephyr-health
+	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
+	VAMS_HEALTH_FIRMWARE="$(VAMS_HEALTH_FIRMWARE)" \
+	./qemu/tests/smoke-vams-firmware-health.sh
 
 firmware-pcie-smoke: zephyr
 	QEMU_SYSTEM_RISCV32="$(QEMU_SYSTEM_RISCV32)" \
@@ -552,6 +600,14 @@ qemu-patch-check:
 		"$(CURDIR)/qemu/patches/0018-hw-misc-add-vams-reset-notification-and-cq-throttling.patch"; \
 	git -C "$$tmp/qemu" apply --check \
 		"$(CURDIR)/qemu/patches/0019-hw-misc-bound-firmware-reset-acknowledgment.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0019-hw-misc-bound-firmware-reset-acknowledgment.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0020-hw-misc-serialize-management-reset-ownership.patch"; \
+	git -C "$$tmp/qemu" apply \
+		"$(CURDIR)/qemu/patches/0020-hw-misc-serialize-management-reset-ownership.patch"; \
+	git -C "$$tmp/qemu" apply --check \
+		"$(CURDIR)/qemu/patches/0021-hw-misc-retain-firmware-health-evidence.patch"; \
 	echo 'QEMU patch series check: PASS'
 
 tree:

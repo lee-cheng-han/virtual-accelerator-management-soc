@@ -7,6 +7,7 @@
 
 #include <vams_event.h>
 #include <vams_overload.h>
+#include <vams_retained.h>
 
 #define VAMS_EVENT_QUEUE_DEPTH 32U
 
@@ -41,6 +42,9 @@ void vams_event_emit(enum vams_event_id id, uint32_t command_id,
 		.arg2 = arg2,
 		.id = (uint16_t)id,
 	};
+
+	vams_retained_note_event((uint32_t)id, command_id, generation,
+				 (uint32_t)event.timestamp_ms);
 
 	if (k_msgq_put(&vams_event_queue, &event, K_NO_WAIT) != 0) {
 		vams_event_record_drop();
