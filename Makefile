@@ -31,7 +31,8 @@ KERNEL_BUILD ?= /lib/modules/$(shell uname -r)/build
 VAMS_LINUX_IMAGE ?=
 VAMS_PCI_MODULE ?= $(CURDIR)/kernel/vams_pci.ko
 VAMS_UAPI_TEST ?= $(CURDIR)/build/kernel/vams-uapi-test
-BUSYBOX ?= busybox
+VAMS_GUEST_INIT ?= $(CURDIR)/build/kernel/vams-guest-init
+GEN_INIT_CPIO ?= gen_init_cpio
 HOST_CC ?= gcc
 HOST_CLANG ?= clang
 VAMS_FIRMWARE ?= $(CURDIR)/build/firmware/baremetal/vams-riscv-fw.elf
@@ -73,7 +74,7 @@ VAMS_DEMO_OUTPUT ?=
 	dma-engine-smoke \
 	pcie-smoke nop-smoke queue-model-smoke cq-backpressure-smoke \
 	kernel kernel-test-build \
-	kernel-uapi-test kernel-smoke \
+	kernel-uapi-test kernel-guest-init kernel-smoke \
 	descriptor-fuzz bar-fuzz fuzz-smoke source-check assurance-smoke \
 	qemu-patch-check tree clean demo
 
@@ -156,7 +157,7 @@ help:
 	  '  make kernel       Build the production vams_pci kernel module' \
 	  '  make kernel-uapi-test' \
 	  '                   Build the static VAMS host-API integration client' \
-	  '  make kernel-smoke Build and test probe, MSI-X, and cleanup in a guest' \
+	  '  make kernel-smoke Test payload DMA, async UAPI, IRQs, and cleanup in a guest' \
 	  '  make qemu-patch-check QEMU_SRC=/path/to/qemu' \
 	  '                   Check that the QEMU patch series applies cleanly' \
 	  '  make tree        Print the repository tree' \
@@ -505,12 +506,18 @@ kernel-uapi-test:
 		-Ikernel/include/uapi kernel/tests/vams-uapi-test.c \
 		-o "$(VAMS_UAPI_TEST)"
 
-kernel-smoke: kernel-test-build kernel-uapi-test
+kernel-guest-init:
+	@mkdir -p "$(dir $(VAMS_GUEST_INIT))"
+	$(HOST_CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -static \
+		kernel/tests/vams-guest-init.c -o "$(VAMS_GUEST_INIT)"
+
+kernel-smoke: kernel-test-build kernel-uapi-test kernel-guest-init
 	QEMU_SYSTEM_X86_64="$(QEMU_SYSTEM_X86_64)" \
 	VAMS_LINUX_IMAGE="$(VAMS_LINUX_IMAGE)" \
 	VAMS_PCI_MODULE="$(VAMS_PCI_MODULE)" \
 	VAMS_UAPI_TEST="$(VAMS_UAPI_TEST)" \
-	BUSYBOX="$(BUSYBOX)" \
+	VAMS_GUEST_INIT="$(VAMS_GUEST_INIT)" \
+	GEN_INIT_CPIO="$(GEN_INIT_CPIO)" \
 	./kernel/tests/smoke-vams-pci.sh
 
 qemu-patch-check:

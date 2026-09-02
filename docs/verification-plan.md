@@ -26,7 +26,7 @@ documentation checks only. Planned tests are not reported as passing.
 | CMD/DMA | golden buffers/CRC/vector results plus zero/max/overflow/alignment matrices |
 | REC/HLT | each recovery scope with pre/post generations and telemetry assertions |
 | FLT-01 | one-shot trigger, expected evidence, clean NOP after every fault |
-| LNX-01 | nine forced probe cleanup points, tracked IRQ/poll completion, version rejection, and 32 concurrent guest NOP ioctls; payload/reset lifetime cases remain |
+| LNX-01 | nine forced probe cleanup points, IRQ/poll completion, version rejection, per-file DMA isolation, every payload opcode, eight outstanding asynchronous requests, 32 concurrent NOPs, busy unmap, close during DMA, active-reset cancellation, unload, and rebind; hot-remove stress remains |
 
 ## Required cases
 
@@ -82,9 +82,12 @@ uses `zephyr-smoke`, `management-mmio-smoke`, `management-smoke`,
 `queue-model-smoke`, `cq-backpressure-smoke`, and `kernel-smoke`. The model test
 compares every exposed
 queue transition and completion across four deterministic randomized seeds.
-The kernel test boots a disposable Linux initramfs and exercises coherent
-queues, interrupt and polling completion, version rejection, 32 concurrent NOP
-ioctls, module binding, and cleanup.
+The kernel test boots a disposable Linux initramfs with a project-owned static
+init and exercises coherent queues, interrupt and polling completion, version
+rejection, opaque buffer bounds/permissions, cross-file isolation, every
+payload opcode, eight outstanding asynchronous NOPs, 32 concurrent synchronous
+NOPs, busy unmap, close during active DMA, eight-request device-reset
+cancellation, stale-queue disablement, module unload, and clean rebind.
 `firmware-pcie-smoke` separately proves valid and invalid PCI submissions cross
 the private bridge into real Zephyr, and that an in-flight pre-reset completion
 is discarded before a clean post-reset command completes. The same integration

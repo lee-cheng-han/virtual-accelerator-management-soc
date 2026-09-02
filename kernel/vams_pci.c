@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Thin Linux queue, interrupt, and host-API driver for the VAMS PCIe endpoint.
- * Payload DMA and asynchronous userspace submission remain deferred.
+ * Linux queue, interrupt, registered-buffer, and asynchronous host-API driver
+ * for the VAMS PCIe endpoint.
  */
 
 #include <linux/completion.h>
@@ -16,8 +16,12 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/mm.h>
+#include <linux/overflow.h>
 #include <linux/pci.h>
+#include <linux/poll.h>
 #include <linux/refcount.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
@@ -32,11 +36,16 @@
 #define VAMS_PCI_DEVICE_ID 0x1100
 #define VAMS_CQ_POLL_INTERVAL_MS 10U
 #define VAMS_NOP_WAIT_MS 1000U
+#define VAMS_MAX_TRANSFER (16U * 1024U * 1024U)
 
 static_assert(sizeof(struct vams_submission) == VAMS_SUBMISSION_SIZE);
 static_assert(sizeof(struct vams_completion) == VAMS_COMPLETION_SIZE);
 static_assert(sizeof(struct vams_ioc_info) == 32);
 static_assert(sizeof(struct vams_ioc_nop) == 56);
+static_assert(sizeof(struct vams_ioc_buffer_register) == 40);
+static_assert(sizeof(struct vams_ioc_buffer_unregister) == 24);
+static_assert(sizeof(struct vams_ioc_submit) == 64);
+static_assert(sizeof(struct vams_ioc_wait) == 64);
 
 static DEFINE_IDA(vams_instance_ida);
 
@@ -52,12 +61,45 @@ enum vams_probe_step {
 	VAMS_PROBE_AFTER_CHARDEV,
 };
 
+struct vams_device;
+struct vams_file;
+
+struct vams_mapping {
+	struct kref refs;
+	struct vams_device *vdev;
+	struct page **pages;
+	struct sg_table sgt;
+	dma_addr_t dma_addr;
+	enum dma_data_direction direction;
+	unsigned int npages;
+	u64 user_address;
+	u64 length;
+	u32 flags;
+	u32 handle;
+};
+
 struct vams_request {
 	struct completion done;
 	refcount_t refs;
 	struct vams_completion result;
+	struct vams_file *owner;
+	struct vams_mapping *source;
+	struct vams_mapping *destination;
 	int driver_status;
 	u32 command_id;
+	u32 reset_generation;
+};
+
+struct vams_file {
+	struct kref refs;
+	struct vams_device *vdev;
+	/* Serializes this file's mapping and reapable-request ownership. */
+	struct mutex lock;
+	struct xarray mappings;
+	struct xarray requests;
+	wait_queue_head_t waitq;
+	atomic_t completed_requests;
+	bool closing;
 };
 
 struct vams_device {
@@ -67,6 +109,7 @@ struct vams_device {
 	u32 fw_version;
 	u32 capabilities;
 	u32 reset_generation;
+	u32 reset_reason;
 	struct vams_submission *sq;
 	dma_addr_t sq_dma;
 	struct vams_completion *cq;
@@ -78,10 +121,13 @@ struct vams_device {
 	struct mutex submit_lock;
 	/* Serializes CQ consumption between IRQ and future polling paths. */
 	spinlock_t cq_lock;
+	/* Orders SQ publication against reset-generation interrupt handling. */
+	spinlock_t reset_lock;
 	struct xarray requests;
 	atomic_t next_command_id;
 	atomic_t pending_requests;
 	struct delayed_work cq_poll_work;
+	struct work_struct reset_work;
 	struct miscdevice miscdev;
 	struct kref refs;
 	char *misc_name;
@@ -199,7 +245,48 @@ static void vams_free_queues(struct vams_device *vdev)
 	vdev->sq = NULL;
 }
 
-static struct vams_request *vams_request_alloc(void)
+static void vams_device_release(struct kref *refs);
+
+static void vams_mapping_release(struct kref *refs)
+{
+	struct vams_mapping *mapping =
+		container_of(refs, struct vams_mapping, refs);
+	struct device *dev = &mapping->vdev->pdev->dev;
+
+	dma_unmap_sg(dev, mapping->sgt.sgl, mapping->sgt.orig_nents,
+		     mapping->direction);
+	sg_free_table(&mapping->sgt);
+	if (mapping->flags & VAMS_BUFFER_WRITE)
+		unpin_user_pages_dirty_lock(mapping->pages, mapping->npages,
+					    true);
+	else
+		unpin_user_pages(mapping->pages, mapping->npages);
+	kfree(mapping->pages);
+	kfree(mapping);
+}
+
+static void vams_mapping_get(struct vams_mapping *mapping)
+{
+	kref_get(&mapping->refs);
+}
+
+static void vams_mapping_put(struct vams_mapping *mapping)
+{
+	if (mapping)
+		kref_put(&mapping->refs, vams_mapping_release);
+}
+
+static void vams_file_release_refs(struct kref *refs)
+{
+	struct vams_file *vfile = container_of(refs, struct vams_file, refs);
+
+	xa_destroy(&vfile->requests);
+	xa_destroy(&vfile->mappings);
+	kref_put(&vfile->vdev->refs, vams_device_release);
+	kfree(vfile);
+}
+
+static struct vams_request *vams_request_alloc(struct vams_file *owner)
 {
 	struct vams_request *request;
 
@@ -209,6 +296,9 @@ static struct vams_request *vams_request_alloc(void)
 
 	init_completion(&request->done);
 	refcount_set(&request->refs, 1);
+	request->owner = owner;
+	if (owner)
+		kref_get(&owner->refs);
 	return request;
 }
 
@@ -219,8 +309,30 @@ static void vams_request_get(struct vams_request *request)
 
 static void vams_request_put(struct vams_request *request)
 {
-	if (refcount_dec_and_test(&request->refs))
+	if (refcount_dec_and_test(&request->refs)) {
+		vams_mapping_put(request->source);
+		vams_mapping_put(request->destination);
+		if (request->owner)
+			kref_put(&request->owner->refs, vams_file_release_refs);
 		kfree(request);
+	}
+}
+
+static void vams_request_sync_for_cpu(struct vams_request *request)
+{
+	struct device *dev;
+
+	if (!request->source && !request->destination)
+		return;
+	dev = &request->owner->vdev->pdev->dev;
+	if (request->source)
+		dma_sync_sg_for_cpu(dev, request->source->sgt.sgl,
+				    request->source->sgt.orig_nents,
+				    request->source->direction);
+	if (request->destination && request->destination != request->source)
+		dma_sync_sg_for_cpu(dev, request->destination->sgt.sgl,
+				    request->destination->sgt.orig_nents,
+				    request->destination->direction);
 }
 
 static bool vams_finish_request(struct vams_device *vdev,
@@ -235,7 +347,12 @@ static bool vams_finish_request(struct vams_device *vdev,
 
 	request->result = *completion;
 	request->driver_status = 0;
-	complete(&request->done);
+	vams_request_sync_for_cpu(request);
+	complete_all(&request->done);
+	if (request->owner && !READ_ONCE(request->owner->closing)) {
+		atomic_inc(&request->owner->completed_requests);
+		wake_up_interruptible(&request->owner->waitq);
+	}
 	atomic_dec(&vdev->pending_requests);
 	vams_request_put(request);
 	return true;
@@ -291,6 +408,24 @@ static unsigned int vams_drain_cq(struct vams_device *vdev)
 	return drained;
 }
 
+static void vams_observe_reset(struct vams_device *vdev)
+{
+	unsigned long flags;
+	u32 generation = vams_readl(vdev, VAMS_REG_RESET_GENERATION);
+	u32 reason;
+
+	if (generation == READ_ONCE(vdev->reset_generation))
+		return;
+	reason = vams_readl(vdev, VAMS_REG_LAST_RESET_REASON);
+	spin_lock_irqsave(&vdev->reset_lock, flags);
+	if (generation != READ_ONCE(vdev->reset_generation)) {
+		WRITE_ONCE(vdev->reset_reason, reason);
+		WRITE_ONCE(vdev->reset_generation, generation);
+		schedule_work(&vdev->reset_work);
+	}
+	spin_unlock_irqrestore(&vdev->reset_lock, flags);
+}
+
 static void vams_cq_poll_work(struct work_struct *work)
 {
 	struct vams_device *vdev =
@@ -300,26 +435,53 @@ static void vams_cq_poll_work(struct work_struct *work)
 	if (READ_ONCE(vdev->removing))
 		return;
 
+	vams_observe_reset(vdev);
 	vams_drain_cq(vdev);
 	if (atomic_read(&vdev->pending_requests) > 0)
 		schedule_delayed_work(&vdev->cq_poll_work,
 				      msecs_to_jiffies(VAMS_CQ_POLL_INTERVAL_MS));
 }
 
-static void vams_cancel_requests(struct vams_device *vdev, int status)
+static void vams_cancel_requests(struct vams_device *vdev, int status,
+				 bool stale_only)
 {
 	struct vams_request *request;
 	unsigned long command_id;
 
 	xa_for_each(&vdev->requests, command_id, request) {
+		if (stale_only && request->reset_generation ==
+		    READ_ONCE(vdev->reset_generation))
+			continue;
 		request = xa_erase(&vdev->requests, command_id);
 		if (!request)
 			continue;
 		request->driver_status = status;
-		complete(&request->done);
+		vams_request_sync_for_cpu(request);
+		complete_all(&request->done);
+		if (request->owner && !READ_ONCE(request->owner->closing)) {
+			atomic_inc(&request->owner->completed_requests);
+			wake_up_interruptible(&request->owner->waitq);
+		}
 		atomic_dec(&vdev->pending_requests);
 		vams_request_put(request);
 	}
+}
+
+static void vams_reset_work(struct work_struct *work)
+{
+	struct vams_device *vdev =
+		container_of(work, struct vams_device, reset_work);
+
+	mutex_lock(&vdev->submit_lock);
+	if (!vdev->removing) {
+		if (READ_ONCE(vdev->reset_reason) ==
+			    VAMS_RESET_REASON_HOST_DEVICE ||
+		    READ_ONCE(vdev->reset_reason) ==
+			    VAMS_RESET_REASON_HOST_QUEUE)
+			vdev->queues_ready = false;
+		vams_cancel_requests(vdev, -ECANCELED, true);
+	}
+	mutex_unlock(&vdev->submit_lock);
 }
 
 static void vams_disable_queues(struct vams_device *vdev);
@@ -412,8 +574,7 @@ static irqreturn_t vams_async_irq(int irq, void *data)
 	}
 
 	if (pending & VAMS_INTR_RESET_DONE)
-		vdev->reset_generation =
-			vams_readl(vdev, VAMS_REG_RESET_GENERATION);
+		vams_observe_reset(vdev);
 
 	vams_writel(vdev, VAMS_REG_INTR_STATUS, pending);
 	atomic64_inc(&vdev->async_interrupts);
@@ -503,11 +664,21 @@ static int vams_track_request(struct vams_device *vdev,
 		if (!command_id)
 			continue;
 		request->command_id = command_id;
+		if (request->owner) {
+			ret = xa_insert(&request->owner->requests, command_id,
+					request, GFP_KERNEL);
+			if (ret == -EBUSY)
+				continue;
+			if (ret)
+				return ret;
+		}
 		vams_request_get(request);
 		ret = xa_insert(&vdev->requests, command_id, request, GFP_KERNEL);
 		if (!ret)
 			return 0;
 		vams_request_put(request);
+		if (request->owner)
+			xa_erase(&request->owner->requests, command_id);
 		if (ret != -EBUSY)
 			return ret;
 	}
@@ -515,11 +686,29 @@ static int vams_track_request(struct vams_device *vdev,
 	return -ENOSPC;
 }
 
-static int vams_submit_nop(struct vams_device *vdev,
-			   struct vams_request *request, u64 user_cookie,
-			   u32 timeout_ms)
+static void vams_request_sync_for_device(struct vams_request *request)
+{
+	struct device *dev;
+
+	if (!request->source && !request->destination)
+		return;
+	dev = &request->owner->vdev->pdev->dev;
+	if (request->source)
+		dma_sync_sg_for_device(dev, request->source->sgt.sgl,
+				       request->source->sgt.orig_nents,
+				       request->source->direction);
+	if (request->destination && request->destination != request->source)
+		dma_sync_sg_for_device(dev, request->destination->sgt.sgl,
+				       request->destination->sgt.orig_nents,
+				       request->destination->direction);
+}
+
+static int vams_submit(struct vams_device *vdev,
+		       struct vams_request *request,
+		       const struct vams_submission *descriptor)
 {
 	struct vams_submission *submission;
+	unsigned long flags;
 	u32 next_tail;
 	u32 sq_head;
 	int ret;
@@ -551,16 +740,16 @@ static int vams_submit_nop(struct vams_device *vdev,
 		goto out_unlock;
 
 	submission = &vdev->sq[vdev->sq_tail];
-	memset(submission, 0, sizeof(*submission));
-	submission->version = cpu_to_le16(VAMS_DESC_VERSION_1);
-	submission->opcode = VAMS_OP_NOP;
+	*submission = *descriptor;
 	submission->command_id = cpu_to_le32(request->command_id);
-	submission->timeout_ms = cpu_to_le32(timeout_ms);
-	submission->user_cookie = cpu_to_le64(user_cookie);
+	vams_request_sync_for_device(request);
+	spin_lock_irqsave(&vdev->reset_lock, flags);
+	request->reset_generation = READ_ONCE(vdev->reset_generation);
 	atomic_inc(&vdev->pending_requests);
 	dma_wmb();
 	vdev->sq_tail = next_tail;
 	vams_writel(vdev, VAMS_REG_SQ_DOORBELL, vdev->sq_tail);
+	spin_unlock_irqrestore(&vdev->reset_lock, flags);
 	if (atomic_read(&vdev->pending_requests) > 0)
 		schedule_delayed_work(&vdev->cq_poll_work,
 				      msecs_to_jiffies(VAMS_CQ_POLL_INTERVAL_MS));
@@ -569,6 +758,20 @@ static int vams_submit_nop(struct vams_device *vdev,
 out_unlock:
 	mutex_unlock(&vdev->submit_lock);
 	return ret;
+}
+
+static int vams_submit_nop(struct vams_device *vdev,
+			   struct vams_request *request, u64 user_cookie,
+			   u32 timeout_ms)
+{
+	struct vams_submission descriptor = {
+		.version = cpu_to_le16(VAMS_DESC_VERSION_1),
+		.opcode = VAMS_OP_NOP,
+		.timeout_ms = cpu_to_le32(timeout_ms),
+		.user_cookie = cpu_to_le64(user_cookie),
+	};
+
+	return vams_submit(vdev, request, &descriptor);
 }
 
 static void vams_device_release(struct kref *refs)
@@ -580,6 +783,7 @@ static void vams_device_release(struct kref *refs)
 	if (vdev->instance >= 0)
 		ida_free(&vams_instance_ida, vdev->instance);
 	kfree(vdev->misc_name);
+	pci_dev_put(vdev->pdev);
 	kfree(vdev);
 }
 
@@ -588,25 +792,460 @@ static int vams_open(struct inode *inode, struct file *file)
 	struct miscdevice *miscdev = file->private_data;
 	struct vams_device *vdev =
 		container_of(miscdev, struct vams_device, miscdev);
+	struct vams_file *vfile;
 	int ret = 0;
+
+	vfile = kzalloc_obj(struct vams_file);
+	if (!vfile)
+		return -ENOMEM;
+	kref_init(&vfile->refs);
+	vfile->vdev = vdev;
+	mutex_init(&vfile->lock);
+	xa_init_flags(&vfile->mappings, XA_FLAGS_ALLOC1);
+	xa_init(&vfile->requests);
+	init_waitqueue_head(&vfile->waitq);
+	atomic_set(&vfile->completed_requests, 0);
 
 	mutex_lock(&vdev->submit_lock);
 	if (vdev->removing) {
 		ret = -ENODEV;
 	} else {
 		kref_get(&vdev->refs);
-		file->private_data = vdev;
+		file->private_data = vfile;
 	}
 	mutex_unlock(&vdev->submit_lock);
+	if (ret) {
+		xa_destroy(&vfile->requests);
+		xa_destroy(&vfile->mappings);
+		kfree(vfile);
+	}
 	return ret;
 }
 
 static int vams_release(struct inode *inode, struct file *file)
 {
-	struct vams_device *vdev = file->private_data;
+	struct vams_file *vfile = file->private_data;
+	struct vams_mapping *mapping;
+	struct vams_request *request;
+	unsigned long index;
 
-	kref_put(&vdev->refs, vams_device_release);
+	mutex_lock(&vfile->lock);
+	vfile->closing = true;
+	xa_for_each(&vfile->requests, index, request) {
+		request = xa_erase(&vfile->requests, index);
+		if (request)
+			vams_request_put(request);
+	}
+	xa_for_each(&vfile->mappings, index, mapping) {
+		mapping = xa_erase(&vfile->mappings, index);
+		if (mapping)
+			vams_mapping_put(mapping);
+	}
+	mutex_unlock(&vfile->lock);
+	wake_up_interruptible(&vfile->waitq);
+	kref_put(&vfile->refs, vams_file_release_refs);
 	return 0;
+}
+
+static enum dma_data_direction vams_mapping_direction(u32 flags)
+{
+	if (flags == VAMS_BUFFER_READ)
+		return DMA_TO_DEVICE;
+	if (flags == VAMS_BUFFER_WRITE)
+		return DMA_FROM_DEVICE;
+	return DMA_BIDIRECTIONAL;
+}
+
+static long vams_ioctl_buffer_register(struct vams_file *vfile,
+				       void __user *argp)
+{
+	struct vams_ioc_buffer_register input;
+	struct vams_mapping *mapping;
+	unsigned long first;
+	unsigned long last;
+	unsigned long end;
+	unsigned int gup_flags = FOLL_LONGTERM;
+	unsigned int npages;
+	long pinned;
+	u32 handle;
+	int mapped;
+	int ret;
+
+	if (copy_from_user(&input, argp, sizeof(input)))
+		return -EFAULT;
+	if (input.size != sizeof(input) ||
+	    input.version != VAMS_UAPI_VERSION || input.handle ||
+	    !input.flags || (input.flags & ~VAMS_BUFFER_FLAGS) ||
+	    !input.length || input.length > VAMS_MAX_TRANSFER ||
+	    input.reserved || input.user_address > ULONG_MAX ||
+	    input.length > ULONG_MAX)
+		return -EINVAL;
+	first = (unsigned long)input.user_address;
+	if (check_add_overflow(first, (unsigned long)input.length, &end) ||
+	    !access_ok((void __user *)first, (unsigned long)input.length))
+		return -EFAULT;
+	last = end - 1;
+	npages = (last >> PAGE_SHIFT) - (first >> PAGE_SHIFT) + 1;
+	mutex_lock(&vfile->lock);
+	mutex_lock(&vfile->vdev->submit_lock);
+	if (vfile->closing || vfile->vdev->removing) {
+		ret = -ENODEV;
+		goto err_unlock_lifecycle;
+	}
+
+	mapping = kzalloc_obj(struct vams_mapping);
+	if (!mapping) {
+		ret = -ENOMEM;
+		goto err_unlock_lifecycle;
+	}
+	mapping->pages = kcalloc(npages, sizeof(*mapping->pages), GFP_KERNEL);
+	if (!mapping->pages) {
+		ret = -ENOMEM;
+		goto err_free_mapping;
+	}
+	mapping->vdev = vfile->vdev;
+	mapping->npages = npages;
+	mapping->user_address = input.user_address;
+	mapping->length = input.length;
+	mapping->flags = input.flags;
+	mapping->direction = vams_mapping_direction(input.flags);
+	kref_init(&mapping->refs);
+	if (input.flags & VAMS_BUFFER_WRITE)
+		gup_flags |= FOLL_WRITE;
+	pinned = pin_user_pages_fast(first & PAGE_MASK, npages, gup_flags,
+				     mapping->pages);
+	if (pinned != npages) {
+		if (pinned > 0)
+			unpin_user_pages(mapping->pages, (unsigned long)pinned);
+		ret = pinned < 0 ? (int)pinned : -EFAULT;
+		goto err_free_pages;
+	}
+	ret = sg_alloc_table_from_pages(&mapping->sgt, mapping->pages, npages,
+					first & ~PAGE_MASK, input.length,
+					GFP_KERNEL);
+	if (ret)
+		goto err_unpin;
+	mapped = dma_map_sg(&vfile->vdev->pdev->dev, mapping->sgt.sgl,
+			    mapping->sgt.orig_nents, mapping->direction);
+	if (!mapped) {
+		ret = -EIO;
+		goto err_free_sg;
+	}
+	if (mapped != 1) {
+		ret = -ERANGE;
+		goto err_unmap;
+	}
+	if (sg_dma_len(mapping->sgt.sgl) < input.length) {
+		ret = -ERANGE;
+		goto err_unmap;
+	}
+	mapping->dma_addr = sg_dma_address(mapping->sgt.sgl);
+
+	ret = xa_alloc(&vfile->mappings, &handle, mapping,
+		       XA_LIMIT(1, UINT_MAX), GFP_KERNEL);
+	if (!ret) {
+		mapping->handle = handle;
+		input.handle = handle;
+	}
+	if (ret)
+		goto err_unmap;
+	if (copy_to_user(argp, &input, sizeof(input))) {
+		xa_erase(&vfile->mappings, handle);
+		vams_mapping_put(mapping);
+		mutex_unlock(&vfile->vdev->submit_lock);
+		mutex_unlock(&vfile->lock);
+		return -EFAULT;
+	}
+	mutex_unlock(&vfile->vdev->submit_lock);
+	mutex_unlock(&vfile->lock);
+	return 0;
+
+err_unmap:
+	dma_unmap_sg(&vfile->vdev->pdev->dev, mapping->sgt.sgl,
+		     mapping->sgt.orig_nents, mapping->direction);
+err_free_sg:
+	sg_free_table(&mapping->sgt);
+err_unpin:
+	unpin_user_pages(mapping->pages, npages);
+err_free_pages:
+	kfree(mapping->pages);
+err_free_mapping:
+	kfree(mapping);
+err_unlock_lifecycle:
+	mutex_unlock(&vfile->vdev->submit_lock);
+	mutex_unlock(&vfile->lock);
+	return ret;
+}
+
+static long vams_ioctl_buffer_unregister(struct vams_file *vfile,
+					 void __user *argp)
+{
+	struct vams_ioc_buffer_unregister input;
+	struct vams_mapping *mapping;
+	int ret = 0;
+
+	if (copy_from_user(&input, argp, sizeof(input)))
+		return -EFAULT;
+	if (input.size != sizeof(input) ||
+	    input.version != VAMS_UAPI_VERSION || !input.handle || input.flags ||
+	    input.reserved)
+		return -EINVAL;
+
+	mutex_lock(&vfile->lock);
+	mapping = xa_load(&vfile->mappings, input.handle);
+	if (!mapping)
+		ret = -ENOENT;
+	else if (refcount_read(&mapping->refs.refcount) != 1)
+		ret = -EBUSY;
+	else
+		xa_erase(&vfile->mappings, input.handle);
+	mutex_unlock(&vfile->lock);
+	if (!ret)
+		vams_mapping_put(mapping);
+	return ret;
+}
+
+static struct vams_mapping *
+vams_mapping_lookup_locked(struct vams_file *vfile, u32 handle, u64 offset,
+			   u32 length, u32 required_flags,
+			   dma_addr_t *dma_address)
+{
+	struct vams_mapping *mapping;
+	dma_addr_t dma_end;
+	u64 end;
+
+	if (!handle || check_add_overflow(offset, (u64)length, &end))
+		return ERR_PTR(-EINVAL);
+	mapping = xa_load(&vfile->mappings, handle);
+	if (!mapping)
+		return ERR_PTR(-ENOENT);
+	if ((mapping->flags & required_flags) != required_flags)
+		return ERR_PTR(-EACCES);
+	if (end > mapping->length)
+		return ERR_PTR(-ERANGE);
+	if (check_add_overflow(mapping->dma_addr, (dma_addr_t)offset,
+			       dma_address) || !*dma_address ||
+	    check_add_overflow(*dma_address, (dma_addr_t)length, &dma_end))
+		return ERR_PTR(-EOVERFLOW);
+	vams_mapping_get(mapping);
+	return mapping;
+}
+
+static long vams_ioctl_submit(struct vams_file *vfile, void __user *argp)
+{
+	struct vams_ioc_submit input;
+	struct vams_submission descriptor = { 0 };
+	struct vams_mapping *source = NULL;
+	struct vams_mapping *destination = NULL;
+	struct vams_request *request;
+	dma_addr_t source_dma = 0;
+	dma_addr_t destination_dma = 0;
+	u32 source_access = 0;
+	u32 destination_access = 0;
+	u32 source_length = 0;
+	int ret;
+
+	if (copy_from_user(&input, argp, sizeof(input)))
+		return -EFAULT;
+	if (input.size != sizeof(input) ||
+	    input.version != VAMS_UAPI_VERSION || input.command_id ||
+	    input.timeout_ms > 60000U ||
+	    input.length > VAMS_MAX_TRANSFER ||
+	    (input.flags & ~VAMS_SUBMIT_VERIFY_CRC) ||
+	    (input.opcode != VAMS_OP_CRC32 && input.flags) ||
+	    ((!input.flags || input.opcode != VAMS_OP_CRC32) &&
+	     input.expected_crc))
+		return -EINVAL;
+
+	switch (input.opcode) {
+	case VAMS_OP_NOP:
+		if (input.source_handle || input.destination_handle ||
+		    input.source_offset || input.destination_offset || input.length)
+			return -EINVAL;
+		break;
+	case VAMS_OP_MEM_COPY:
+		if (!input.length || !input.source_handle ||
+		    !input.destination_handle)
+			return -EINVAL;
+		source_access = VAMS_BUFFER_READ;
+		destination_access = VAMS_BUFFER_WRITE;
+		source_length = input.length;
+		break;
+	case VAMS_OP_MEM_FILL:
+		if (!input.length || !input.source_handle ||
+		    !input.destination_handle)
+			return -EINVAL;
+		source_access = VAMS_BUFFER_READ;
+		destination_access = VAMS_BUFFER_WRITE;
+		source_length = 1;
+		break;
+	case VAMS_OP_CRC32:
+		if (!input.length || !input.source_handle ||
+		    input.destination_handle || input.destination_offset)
+			return -EINVAL;
+		source_access = VAMS_BUFFER_READ;
+		source_length = input.length;
+		break;
+	case VAMS_OP_VECTOR_ADD:
+		if (input.length < sizeof(u32) ||
+		    (input.length & (sizeof(u32) - 1)) ||
+		    !input.source_handle || !input.destination_handle)
+			return -EINVAL;
+		source_access = VAMS_BUFFER_READ;
+		destination_access = VAMS_BUFFER_READ | VAMS_BUFFER_WRITE;
+		source_length = input.length;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	mutex_lock(&vfile->lock);
+	if (vfile->closing) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+	if (source_access) {
+		source = vams_mapping_lookup_locked(vfile, input.source_handle,
+					    input.source_offset,
+					    source_length, source_access,
+					    &source_dma);
+		if (IS_ERR(source)) {
+			ret = PTR_ERR(source);
+			source = NULL;
+			goto out_unlock;
+		}
+	}
+	if (destination_access) {
+		destination = vams_mapping_lookup_locked(vfile,
+				input.destination_handle,
+				input.destination_offset, input.length,
+				destination_access, &destination_dma);
+		if (IS_ERR(destination)) {
+			ret = PTR_ERR(destination);
+			destination = NULL;
+			goto out_put_source;
+		}
+	}
+	if (source_dma && destination_dma && input.opcode != VAMS_OP_MEM_FILL &&
+	    source_dma < destination_dma + input.length &&
+	    destination_dma < source_dma + input.length) {
+		ret = -EINVAL;
+		goto out_put_mappings;
+	}
+
+	request = vams_request_alloc(vfile);
+	if (!request) {
+		ret = -ENOMEM;
+		goto out_put_mappings;
+	}
+	request->source = source;
+	request->destination = destination;
+	source = NULL;
+	destination = NULL;
+	descriptor.version = cpu_to_le16(VAMS_DESC_VERSION_1);
+	descriptor.opcode = input.opcode;
+	descriptor.flags = input.flags;
+	descriptor.source_dma = cpu_to_le64(source_dma);
+	descriptor.destination_dma = cpu_to_le64(destination_dma);
+	descriptor.length = cpu_to_le32(input.length);
+	descriptor.timeout_ms = cpu_to_le32(input.timeout_ms);
+	descriptor.user_cookie = cpu_to_le64(input.user_cookie);
+	descriptor.expected_crc = cpu_to_le32(input.expected_crc);
+	ret = vams_submit(vfile->vdev, request, &descriptor);
+	if (ret) {
+		vams_request_put(request);
+		goto out_unlock;
+	}
+	input.command_id = request->command_id;
+	if (copy_to_user(argp, &input, sizeof(input))) {
+		xa_erase(&vfile->requests, request->command_id);
+		if (completion_done(&request->done))
+			atomic_dec_if_positive(&vfile->completed_requests);
+		vams_request_put(request);
+		ret = -EFAULT;
+	} else {
+		ret = 0;
+	}
+	mutex_unlock(&vfile->lock);
+	return ret;
+
+out_put_mappings:
+	vams_mapping_put(destination);
+out_put_source:
+	vams_mapping_put(source);
+out_unlock:
+	mutex_unlock(&vfile->lock);
+	return ret;
+}
+
+static long vams_ioctl_wait(struct vams_file *vfile, void __user *argp)
+{
+	struct vams_ioc_wait output;
+	struct vams_request *request;
+	long waited;
+	int ret = 0;
+
+	if (copy_from_user(&output, argp, sizeof(output)))
+		return -EFAULT;
+	if (output.size != sizeof(output) ||
+	    output.version != VAMS_UAPI_VERSION || !output.command_id ||
+	    output.flags || output.timeout_ms > 60000U || output.driver_status ||
+	    output.status || output.error_code || output.bytes_processed ||
+	    output.result_crc || output.reserved0 || output.user_cookie ||
+	    output.device_timestamp || output.reserved1)
+		return -EINVAL;
+
+	mutex_lock(&vfile->lock);
+	request = xa_load(&vfile->requests, output.command_id);
+	if (request)
+		vams_request_get(request);
+	mutex_unlock(&vfile->lock);
+	if (!request)
+		return -ENOENT;
+
+	if (!output.timeout_ms) {
+		if (!completion_done(&request->done)) {
+			ret = -EAGAIN;
+			goto out_put;
+		}
+	} else {
+		waited = wait_for_completion_interruptible_timeout(&request->done,
+				msecs_to_jiffies(output.timeout_ms));
+		if (waited < 0) {
+			ret = waited;
+			goto out_put;
+		}
+		if (!waited) {
+			ret = -ETIMEDOUT;
+			goto out_put;
+		}
+	}
+
+	output.driver_status = request->driver_status;
+	output.status = le16_to_cpu(request->result.status);
+	output.error_code = le16_to_cpu(request->result.error_code);
+	output.bytes_processed =
+		le32_to_cpu(request->result.bytes_processed);
+	output.result_crc = le32_to_cpu(request->result.result_crc);
+	output.user_cookie = le64_to_cpu(request->result.user_cookie);
+	output.device_timestamp =
+		le64_to_cpu(request->result.device_timestamp);
+
+	mutex_lock(&vfile->lock);
+	if (xa_load(&vfile->requests, output.command_id) != request) {
+		ret = -EALREADY;
+	} else if (copy_to_user(argp, &output, sizeof(output))) {
+		ret = -EFAULT;
+	} else {
+		xa_erase(&vfile->requests, output.command_id);
+		atomic_dec_if_positive(&vfile->completed_requests);
+		vams_request_put(request);
+	}
+	mutex_unlock(&vfile->lock);
+
+out_put:
+	vams_request_put(request);
+	return ret;
 }
 
 static long vams_ioctl_info(struct vams_device *vdev, void __user *argp)
@@ -649,7 +1288,7 @@ static long vams_ioctl_nop(struct vams_device *vdev, void __user *argp)
 	    nop.flags || nop.reserved || nop.timeout_ms > 60000U)
 		return -EINVAL;
 
-	request = vams_request_alloc();
+	request = vams_request_alloc(NULL);
 	if (!request)
 		return -ENOMEM;
 	ret = vams_submit_nop(vdev, request, nop.user_cookie, nop.timeout_ms);
@@ -692,7 +1331,8 @@ out_put:
 static long vams_ioctl(struct file *file, unsigned int command,
 		       unsigned long argument)
 {
-	struct vams_device *vdev = file->private_data;
+	struct vams_file *vfile = file->private_data;
+	struct vams_device *vdev = vfile->vdev;
 	void __user *argp = (void __user *)argument;
 
 	switch (command) {
@@ -700,15 +1340,47 @@ static long vams_ioctl(struct file *file, unsigned int command,
 		return vams_ioctl_info(vdev, argp);
 	case VAMS_IOCTL_NOP:
 		return vams_ioctl_nop(vdev, argp);
+	case VAMS_IOCTL_BUFFER_REGISTER:
+		return vams_ioctl_buffer_register(vfile, argp);
+	case VAMS_IOCTL_BUFFER_UNREGISTER:
+		return vams_ioctl_buffer_unregister(vfile, argp);
+	case VAMS_IOCTL_SUBMIT:
+		return vams_ioctl_submit(vfile, argp);
+	case VAMS_IOCTL_WAIT:
+		return vams_ioctl_wait(vfile, argp);
 	default:
 		return -ENOTTY;
 	}
+}
+
+static __poll_t vams_poll(struct file *file, poll_table *wait)
+{
+	struct vams_file *vfile = file->private_data;
+	struct vams_device *vdev = vfile->vdev;
+	__poll_t mask = 0;
+	u32 sq_head;
+	u32 next_tail;
+
+	poll_wait(file, &vfile->waitq, wait);
+	if (atomic_read(&vfile->completed_requests) > 0)
+		mask |= EPOLLIN | EPOLLRDNORM;
+	if (READ_ONCE(vfile->closing) || READ_ONCE(vdev->removing))
+		return mask | EPOLLERR | EPOLLHUP;
+	if (!READ_ONCE(vdev->queues_ready))
+		return mask | EPOLLERR;
+	sq_head = vams_readl(vdev, VAMS_REG_SQ_HEAD);
+	next_tail = (READ_ONCE(vdev->sq_tail) + 1) &
+		(VAMS_QUEUE_DEPTH - 1);
+	if (sq_head < VAMS_QUEUE_DEPTH && next_tail != sq_head)
+		mask |= EPOLLOUT | EPOLLWRNORM;
+	return mask;
 }
 
 static const struct file_operations vams_fops = {
 	.owner = THIS_MODULE,
 	.open = vams_open,
 	.release = vams_release,
+	.poll = vams_poll,
 	.unlocked_ioctl = vams_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
 };
@@ -830,7 +1502,7 @@ static int vams_poll_selftest(struct vams_device *vdev)
 
 	if (!probe_poll_selftest)
 		return 0;
-	request = vams_request_alloc();
+	request = vams_request_alloc(NULL);
 	if (!request)
 		return -ENOMEM;
 
@@ -888,15 +1560,17 @@ static int vams_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (!vdev)
 		return -ENOMEM;
 
-	vdev->pdev = pdev;
+	vdev->pdev = pci_dev_get(pdev);
 	vdev->instance = -1;
 	kref_init(&vdev->refs);
 	mutex_init(&vdev->submit_lock);
 	spin_lock_init(&vdev->cq_lock);
+	spin_lock_init(&vdev->reset_lock);
 	xa_init_flags(&vdev->requests, XA_FLAGS_LOCK_IRQ);
 	atomic_set(&vdev->next_command_id, 0);
 	atomic_set(&vdev->pending_requests, 0);
 	INIT_DELAYED_WORK(&vdev->cq_poll_work, vams_cq_poll_work);
+	INIT_WORK(&vdev->reset_work, vams_reset_work);
 	atomic64_set(&vdev->cq_interrupts, 0);
 	atomic64_set(&vdev->async_interrupts, 0);
 #ifdef CONFIG_VAMS_PCI_TESTING
@@ -1059,7 +1733,8 @@ err_free_async_irq:
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_ASYNC_VECTOR), vdev);
 err_free_cq_irq:
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_CQ_VECTOR), vdev);
-	vams_cancel_requests(vdev, -ENODEV);
+	cancel_work_sync(&vdev->reset_work);
+	vams_cancel_requests(vdev, -ENODEV, false);
 err_free_vectors:
 	pci_free_irq_vectors(pdev);
 err_free_queues:
@@ -1090,7 +1765,8 @@ static void vams_remove(struct pci_dev *pdev)
 	pci_clear_master(pdev);
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_ASYNC_VECTOR), vdev);
 	free_irq(pci_irq_vector(pdev, VAMS_MSIX_CQ_VECTOR), vdev);
-	vams_cancel_requests(vdev, -ENODEV);
+	cancel_work_sync(&vdev->reset_work);
+	vams_cancel_requests(vdev, -ENODEV, false);
 	pci_free_irq_vectors(pdev);
 	vams_free_queues(vdev);
 	pci_iounmap(pdev, vdev->bar0);

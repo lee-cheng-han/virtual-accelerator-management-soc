@@ -1,99 +1,96 @@
-# Linux PCI Driver
+# Linux PCI driver
 
 ## Scope
 
-`vams_pci.ko` is the deliberately thin Linux host driver for PCI vendor/device
-`1b36:1100`. When DMA is advertised, it allocates and configures one coherent
-SQ/CQ pair at depth 16 and registers `/dev/vamsN`. The versioned ioctl API
-reports device information and submits synchronous NOP requests. Payload DMA
-and asynchronous userspace submission are deliberately not exposed yet.
+`vams_pci.ko` is the thin Linux transport for PCI vendor/device `1b36:1100`.
+When DMA is advertised it configures one coherent depth-16 SQ/CQ pair,
+registers `/dev/vamsN`, and exposes versioned information, buffer registration,
+asynchronous NOP/copy/fill/CRC32/vector operations, wait, and `poll` interfaces.
+Policy, descriptor validation, scheduling, and payload execution remain owned
+by firmware and the endpoint.
 
-Probe performs the following ordered checks and acquisitions:
+Probe acquires and validates resources in this order:
 
-1. allocate driver state and enable the PCI memory function;
-2. verify BAR0 is a memory resource of at least 4 KiB, reserve it, and map it;
-3. mask and clear stale VAMS interrupt sources;
-4. verify BAR identity, hardware-interface major 1, descriptor version 1,
-   MSI-X capability, and READY without RESETTING or FATAL;
-5. negotiate a coherent 64-bit DMA mask with a 32-bit fallback;
-6. allocate zeroed coherent SQ/CQ rings when DMA is advertised;
-7. allocate exactly two MSI-X vectors and install the CQ and async handlers;
-8. enable PCI bus mastering, program CQ then SQ, configure 12/8 CQ high/low
-   watermarks when advertised, enable the device, and unmask VAMS interrupt
-   sources;
-9. register the reference-counted misc character device.
+1. enable the PCI memory function and validate/map the 4 KiB BAR0;
+2. mask stale sources and validate identity, ABI versions, capabilities, and
+   READY state;
+3. negotiate a coherent 64-bit DMA mask with a 32-bit fallback;
+4. allocate aligned coherent SQ/CQ rings;
+5. allocate exactly two MSI-X vectors and register CQ and asynchronous handlers;
+6. enable bus mastering, configure queues and CQ watermarks, then enable IRQs;
+7. register the reference-counted misc character device.
 
-Every error path unwinds acquired resources in reverse order. Remove first
-rejects new API operations and deregisters the device node, synchronizes the
-poller, masks device sources, disables queues and bus mastering, frees IRQs and
-tracked requests, then releases vectors, rings, BAR0, and the PCI function.
+Every probe failure unwinds the acquired prefix in reverse order. Remove first
+rejects new operations and removes the device node, stops CQ/reset work, masks
+and frees IRQs, terminates tracked requests with `-ENODEV`, then releases
+vectors, rings, BAR0, and the PCI function.
 
-Vector 0 handles the sticky CQ source. It reads CQ tail, executes `dma_rmb()`,
-copies completions, publishes CQ head, and only then acknowledges its assigned
-W1C source. Vector 1 handles ERROR, FW_EVENT, and RESET_DONE. Each handler
-returns `IRQ_NONE` when its source is absent; the async handler snapshots device
-error state and updates the observed reset generation.
+## Queue and completion ownership
 
-Each userspace NOP receives a driver-generated nonzero command ID and a
-reference-counted tracking object stored in an IRQ-safe XArray before SQ
-publication. Completion lookup removes exactly one owner, copies the result,
-and wakes the ioctl waiter. Interrupted or timed-out callers drop only their
-reference; the device-owned request remains valid until completion or teardown.
-A 10 ms delayed worker drains CQ while requests are outstanding, so masking or
-losing MSI-X increases latency but cannot strand a request.
+SQ publication is serialized by `submit_lock`. The driver inserts a
+reference-counted request into both the device command-ID table and its owning
+file table before applying `dma_wmb()` and ringing the SQ doorbell. Vector 0
+drains CQ after `dma_rmb()`, removes the global request exactly once, synchronizes
+streaming mappings for the CPU, wakes waiters, publishes CQ head, and then
+acknowledges its W1C source. A delayed worker performs the same drain every
+10 ms while requests exist, providing lost-interrupt fallback.
 
-PCI removal first rejects new opens/submissions and deregisters the device node,
-then synchronizes polling and IRQ work, disables queues, cancels tracked
-requests with `-ENODEV`, and releases DMA resources. Open file descriptors hold
-driver state through `kref`, preventing use-after-free after device removal.
-The exact userspace contract is in [the Linux UAPI guide](linux-uapi.md).
+Vector 1 handles ERROR, FW_EVENT, and RESET_DONE. Reset generation updates are
+ordered against SQ doorbell publication with a spinlock. Serialized reset work
+cancels only requests tagged with an older generation, avoiding both stale DMA
+ownership and accidental cancellation of requests submitted after reset.
+
+Each open file owns two XArrays: opaque mappings and reapable requests.
+Registered buffers are long-term pinned and streaming-DMA mapped with explicit
+device read/write permissions. Requests take mapping references before
+publication. Unregister therefore cannot unpin an active mapping, and file
+release may hide all objects immediately while device-owned references keep
+pages and driver state alive through terminal completion. Open files and
+requests hold `kref` references through PCI removal to prevent state
+use-after-free.
+
+The UAPI uses only fixed-width fields and routes compat ioctls through the same
+layout. Its exact validation and result contract is in
+[the Linux UAPI guide](linux-uapi.md).
 
 ## Build
 
-Build against an installed or prepared kernel tree:
+Build against a configured kernel tree with the kernel `W=1` warning set:
 
 ```sh
 make kernel KERNEL_BUILD=/path/to/linux/build
 ```
 
-The build uses the kernel `W=1` warning set. The module metadata and modalias
-allow normal PCI autoloading for `1b36:1100`.
+The module metadata and PCI alias support normal autoloading for `1b36:1100`.
 
 ## Disposable-guest validation
 
-The test-only build enables deterministic probe failures after PCI enable, BAR
-reservation, BAR mapping, DMA-mask negotiation, coherent-ring allocation,
-vector allocation, each IRQ registration, and character-device registration.
-It also enables opt-in probe
-self-tests that force both MSI-X paths, submit one generated-ABI NOP, and prove
-polling completion while CQ interrupts are masked. These controls are excluded
-from the production module.
+The test-only module can fail probe after each of nine acquisitions and can
+force both MSI-X vectors, a generated-ABI NOP, and CQ polling while the CQ
+interrupt is masked. Those controls are excluded from production builds.
 
 ```sh
-make kernel-test-build \
-  KERNEL_BUILD=/path/to/linux/build
-
 make kernel-smoke \
   KERNEL_BUILD=/path/to/linux/build \
   VAMS_LINUX_IMAGE=/path/to/matching/bzImage \
-  BUSYBOX=/path/to/static/busybox \
+  GEN_INIT_CPIO=/path/to/linux/build/usr/gen_init_cpio \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
-The smoke test creates a temporary initramfs and does not need a disk image. In
-the guest it verifies PCI identity, all nine injected cleanup paths, successful
-rebinding after failures, both MSI-X vectors, a NOP ID/cookie round trip, normal
-remove, and a second clean probe/remove cycle. A static client also runs 32 NOP
-ioctls over four file descriptors, requiring unique IDs and exact cookies. A
-test kernel and static BusyBox
-are external pinned dependencies; they are never committed as generated
-artifacts.
+The script creates a temporary initramfs containing a project-owned static init
+and UAPI test; it requires neither BusyBox nor a disk image. In one boot it
+checks all probe unwind points and clean rebind, both IRQs, interrupt polling,
+all payload opcodes, mapping isolation and lifetime, asynchronous readiness and
+reaping, concurrent synchronous requests, close during DMA, active device-reset
+cancellation, normal unload, and a second clean probe/remove cycle.
 
 ## Known limitations
 
-- No payload DMA, asynchronous userspace queue, reset orchestration, or
-  power-management interface exists yet.
-- Firmware version zero is accepted because the PCIe shell is not connected to
-  the RISC-V subsystem. READY and the hardware ABI remain mandatory.
-- Independent VAMS functions receive distinct device nodes, but multi-device
-  concurrency is not yet part of the stress suite.
+- Registered ranges must DMA-map as one contiguous segment; scatter/gather
+  descriptor chaining is not implemented.
+- Public cancel and reset-control ioctls, hot-remove-during-DMA stress,
+  debugfs/tracepoints, and a stable userspace library remain planned.
+- Firmware version zero is accepted because the standalone PCIe shell is not
+  connected to the RISC-V subsystem in this single-QEMU guest test.
+- Independent functions receive distinct device nodes, but multi-device and
+  memory-pressure qualification are not yet part of the guest suite.

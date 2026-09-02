@@ -25,8 +25,9 @@ In addition to coherent PCI
 SQ/CQ DMA and the Linux guest NOP round trip, the standalone management harness
 now has a private ownership portal and generated firmware ABI. Zephyr captures,
 validates, and completes valid and unsupported-version NOPs. The Linux driver
-now tracks concurrent requests, polls CQ as an interrupt fallback, and exposes
-a versioned host API with tested ID/cookie round trips. A deterministic
+now exposes per-file registered DMA buffers, every v1 payload command,
+asynchronous submit/wait, `poll`, concurrent request tracking, interrupt
+fallback, reset-generation cancellation, and safe process-exit ownership. A deterministic
 reference model compares QEMU ownership, backpressure, wraparound, interrupt,
 error, completion, and reset state after every randomized operation. The
 dual-QEMU integration now DMA-stages PCI submissions through the private portal,
@@ -72,9 +73,9 @@ checks source/contracts and clean patch application on every change, while
 main/manual runs build QEMU and execute model, fuzz, fault, and stress suites.
 The offline `make demo` verifies pinned QEMU identities and then runs the real
 firmware bridge, all payload operations, deterministic recovery, and queue
-stress with per-stage logs and JSON evidence. Reproducible Linux guest artifacts,
-public payload UAPI coverage, unified trace export, and the fully composed guest
-demo remain before Release 1 completion.
+stress with per-stage logs and JSON evidence. Pinned reproducible Linux guest
+artifacts, public cancel/reset control, unified trace export, and the fully
+composed guest demo remain before Release 1 completion.
 
 Release 1 is complete only after Phase 10. Multiple queues, management cores,
 IOMMU emulation, signing/update schemes, SR-IOV, and power management require a
@@ -101,26 +102,25 @@ explicitly planned and are not counted as implemented.
 
 | Improvement | Applied to completed work | Remaining acceptance work |
 |---|---|---|
-| Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, and firmware fixed-pool transitions, running-result identity validation, and exactly-once publication are fail-fast assertions. | Host mapping lifetime and recovery-manager escalation invariants. |
+| Executable state invariants | QEMU queue/engine invariants, active engine-epoch checks, firmware fixed-pool transitions, and Linux per-file mapping/request references and generation-tagged cancellation enforce fail-fast ownership. | Kernel-debugging validation of host invariants and recovery-manager escalation invariants. |
 | Descriptor/register fuzzing | Replayable 4,096-case raw-descriptor and malformed-BAR regressions with seeds and failure traces. | Coverage-guided fuzzing, mailbox parser, interrupt/reset sequences, and permanent corpus minimization. |
-| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Descriptor capture defers without acknowledgment when the slab is full; internal handoffs are nonblocking capacity invariants; completion publication, queue/device reset acknowledgment, management/watchdog reset serialization, and recovery waits are bounded. The Linux driver programs tested CQ high/low watermarks. | Extend ownership and cancellation across the public asynchronous Linux API. |
-| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort, completion-publication, and reset-acknowledgment bounds, saturating escalation/overload counters, bridge-disconnect reconciliation, and serialized management/watchdog terminal reset notification have executable paths. | Cross-process removal and host lifecycle recovery. |
+| Real firmware scheduler | Zephyr uses an eight-object slab with receiver, validator, EDF scheduler, recovery-manager, and completion tasks connected by bounded queues. Payload commands remain firmware-owned through the terminal result. Descriptor capture defers without acknowledgment when the slab is full; internal handoffs are nonblocking capacity invariants; completion publication, queue/device reset acknowledgment, management/watchdog reset serialization, and recovery waits are bounded. The Linux driver programs tested CQ high/low watermarks and retains command/mapping ownership through asynchronous completion. | Add explicit public cancellation and scheduler telemetry. |
+| Timeout and recovery | QEMU engine deadlines, queue/device generation cancellation, engine-only epoch reset, firmware queued deadlines/generation cancellation, result/abort acknowledgment, 100 ms abort, completion-publication, and reset-acknowledgment bounds, saturating escalation/overload counters, bridge-disconnect reconciliation, serialized management/watchdog terminal reset notification, and host generation-tagged request cancellation have executable paths. | Public reset control and hot-remove stress with active DMA. |
 | Chunked DMA | Every payload opcode uses 64 KiB chunks; maximum-transfer copy/CRC, cross-boundary fill/vector, directional errors, guards, and v1 completion reporting are tested. | Persisted cancellation points, Nth-chunk faults, and memory-pressure evidence. |
 | Deterministic faults | Six debug-gated PCI faults provide one-shot/Nth-match timeout, IRQ, hang, DMA-read, DMA-write, and active-reset injection; test-only injection independently freezes all eight essential firmware tasks; two named checkpoints, evidence persistence, lockout, recovery, and post-fault commands are tested. | Mailbox corruption, Nth-chunk failure, and additional ordering checkpoints. |
-| Thin Linux payload API | Versioned info/NOP interface, coherent queues, concurrency, polling fallback, and cleanup tests exist. | Payload mapping, asynchronous submit/wait, process-exit ownership, and removal races. |
+| Thin Linux payload API | Versioned info/NOP plus per-file long-term pinned DMA mappings, all payload opcodes, asynchronous submit/wait, multiple outstanding requests, `poll`/`epoll`, compat-safe layouts, reset cancellation, process-exit retention, and guest cleanup tests exist. | Public cancel/reset controls, scatter/gather mappings, hot-removal races, tracepoints/debugfs, and `libvams`. |
 | Memory-order verification | Queue transport documents host/device ownership and QEMU DMA ordering; model and integration tests exercise the normal publication chain. | Independently delayed release/acquire checkpoints from descriptor write through CQ visibility, interrupt, and host consumption. |
 | Unified observability | Firmware heartbeat/reset telemetry and stable command ID/cookie results exist. | Cross-layer structured events, bounded drop reporting, merged trace, and JSON CLI. |
 | Stress/performance | Queue model plus deterministic qualification cover one million mixed commands, 1,000 resets, queue wrap/high-water, 24 virtual hours, integrity, liveness, and host-clock latency distributions. The rebuilt firmware passed the 41-firmware/39-host dual-QEMU suite and recorded 53,860/524,288 bytes SRAM, 748 ms watchdog margin, all task stack margins, loaded pool/queue high-water values, acknowledged abort, escalation, and post-recovery progress. | Establish a pinned-runner baseline and add worst-case concurrent-process, process-exit, memory-pressure, cross-scope recovery, and extended-fault qualification. |
-| Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; debug faults are property-gated, absent from production capabilities, and lockable until cold reset. | DMA-aperture enforcement, per-process buffer ownership, privilege checks, hostile-parser coverage, and reset/removal isolation tests. |
+| Security and isolation | Descriptor validation rejects malformed ranges, overlap, alignment, flags, and unsupported operations before payload access; the Linux API enforces opaque per-file handles, bounds, device read/write permissions, busy unmap, and cross-file rejection; debug faults are property-gated, absent from production capabilities, and lockable until cold reset. | Modeled IOMMU faults, privilege policy, hostile-parser coverage, and adversarial hot-removal isolation tests. |
 | Requirement traceability | Generated ABI artifacts and normative documents define the current cross-layer contract. | Stable requirement IDs linked to design, implementation, test, CI evidence, and explicit limitation in a generated compliance matrix. |
-| Reproducible CI and demo | Central pins, QEMU patch/source hashes, compatibility data, release-evidence validation, clean patch CI, main/manual virtual regressions, and an offline one-command firmware/payload/fault/stress demo with archived JSON/logs are implemented. Ubuntu's RISC-V GCC 14.2.0 successfully performs development rebuilds. | Acquire and hash-lock the pinned GCC 13.4.0 release toolchain and guest artifacts; add sanitizer/static-analysis/coverage jobs, unified traces, public payload UAPI, and the Linux guest test to the demo. |
+| Reproducible CI and demo | Central pins, QEMU patch/source hashes, compatibility data, release-evidence validation, clean patch CI, main/manual virtual regressions, an offline firmware/payload/fault/stress demo, and a diskless Linux guest payload-UAPI test with a project-owned static init are implemented. Ubuntu's RISC-V GCC 14.2.0 successfully performs development rebuilds. | Acquire and hash-lock the pinned GCC 13.4.0 release toolchain and Linux artifacts; add sanitizer/static-analysis/coverage jobs, unified traces, and the Linux guest test to the main demo. |
 
 ### Near-term implementation order
 
-1. Extend the Linux API with registered payload mappings, asynchronous
-   submit/wait, `poll`/`epoll`, per-process ownership, and safe close/remove
-   cancellation; enforce DMA apertures and privilege boundaries at the same
-   time.
+1. Finish the Linux host surface with explicit cancel/reset controls,
+   scatter/gather support, hot-remove fault tests, kernel tracepoints/debugfs,
+   and a stable `libvams` wrapper.
 2. Add independently controlled memory-order tests and the merged structured
    trace needed to diagnose failures across firmware, QEMU, kernel, and
    userspace.
@@ -218,6 +218,13 @@ processes, asynchronous completion, safe exit/removal with work outstanding,
 and zero leaked mappings, requests, or use-after-free reports under kernel
 debugging configurations.
 
+Implemented so far: opaque per-file mappings with bounds and permissions, every
+v1 opcode, multiple outstanding requests, submit/wait, `poll`/`epoll`, compat
+layouts, busy unmap, reset-generation cancellation, and close/process-exit
+retention are exercised in the disposable QEMU guest. Explicit cancellation,
+reset control, hot-remove stress, kernel-debugging runs, observability, and the
+userspace library remain for this work package's complete acceptance gate.
+
 ### Work package D — DMA security and process isolation
 
 - Enforce a per-file DMA aperture using opaque mapping handles, bounds,
@@ -262,7 +269,7 @@ chunks, and no stale visibility across reset or migration.
 ### Work package F — Full Linux guest demonstration
 
 - Pin and hash a Linux source/configuration, matching headers and kernel image,
-  static BusyBox, module, initramfs recipe, and userspace tools.
+  module, project-owned static init/client, initramfs recipe, and userspace tools.
 - Extend `make demo` to boot management firmware and the Linux guest, load the
   driver, report hardware/firmware/ABI/UAPI versions, run every command through
   the public API, independently verify output, inject a fault, prove recovery,
@@ -331,8 +338,8 @@ bypass for the documented duration and workload.
 ### Work package J — Hermetic builds and layered CI
 
 - Hash-lock the RISC-V compiler, Zephyr Python wheels, host container, QEMU
-  dependencies, Linux kernel/headers, BusyBox, guest filesystem, CI actions, and
-  generated artifact manifest.
+  dependencies, Linux kernel/headers and initramfs generator, guest filesystem,
+  CI actions, and generated artifact manifest.
 - Provide a container, Nix, or Guix environment with fixed locale/timestamps,
   no host-tool leakage, offline rebuild after acquisition, compiler/linker
   identity, SBOM, provenance, and repeated-build hash comparison.

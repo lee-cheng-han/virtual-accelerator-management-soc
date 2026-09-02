@@ -4,7 +4,8 @@ Virtual Accelerator Management SoC (VAMS) is a specification-first portfolio
 project for a QEMU PCIe accelerator whose control plane runs real RTOS firmware
 on an embedded RISC-V management CPU. The host submits versioned DMA
 descriptors; firmware validates, schedules, monitors, and recovers work; a thin
-Linux PCI driver only exposes the queues and lifecycle controls.
+Linux PCI driver exposes opaque DMA buffers, asynchronous commands, completion
+readiness, and lifecycle controls without exposing DMA addresses.
 
 > Status: **Offline hardware-free system demo implemented.**
 > The
@@ -120,7 +121,10 @@ internal management peripheral, not the host datapath.
 - One coherent SQ/CQ pair with checked doorbells, DMA ordering, and paired reset
 - Successful and invalid NOP completions through QTest raw guest memory
 - Linux guest NOP round trip through a real coherent ring and MSI-X interrupt
-- Versioned `/dev/vamsN` UAPI with tracked concurrent NOP requests
+- Versioned `/dev/vamsN` UAPI with per-file registered DMA buffers and
+  asynchronous NOP, copy, fill, CRC32, and vector requests
+- Wait and `poll` completion interfaces with reset-generation cancellation,
+  cross-file isolation, busy unmap, and safe close during active DMA
 - Lost-interrupt CQ polling fallback and bounded request cancellation
 - Deterministic SQ/CQ reference-model comparison across randomized queue,
   wraparound, backpressure, interrupt, error, and reset sequences
@@ -236,13 +240,14 @@ make kernel KERNEL_BUILD=/path/to/linux/build
 make kernel-smoke \
   KERNEL_BUILD=/path/to/linux/build \
   VAMS_LINUX_IMAGE=/path/to/matching/bzImage \
-  BUSYBOX=/path/to/static/busybox \
+  GEN_INIT_CPIO=/path/to/linux/build/usr/gen_init_cpio \
   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
 ```
 
 `make demo` reports that the full PCIe accelerator demo is not implemented.
-The kernel smoke test builds a temporary initramfs and needs matching Linux
-headers/image plus static BusyBox; it does not require a disk image.
+The kernel smoke test builds a temporary initramfs from project-owned static
+test executables. It needs matching Linux headers/image and the kernel's
+`gen_init_cpio`; it requires neither BusyBox nor a disk image.
 
 ## Specification map
 
@@ -268,7 +273,7 @@ headers/image plus static BusyBox; it does not require a disk image.
 | [Management peripherals](docs/management-peripherals.md) | Mailbox, watchdog, reset, telemetry, and tests |
 | [PCIe endpoint](docs/pcie-endpoint.md) | PCI identity, BAR0, MSI-X, reset, and QTest contract |
 | [Linux PCI driver](docs/linux-pci-driver.md) | Probe/remove, ABI validation, IRQs, cleanup, and guest test |
-| [Linux UAPI](docs/linux-uapi.md) | Versioning, device info, synchronous NOP, and lifetime rules |
+| [Linux UAPI](docs/linux-uapi.md) | Registered buffers, asynchronous commands, wait/poll, isolation, and lifetime rules |
 | [NOP command path](docs/nop-command-path.md) | Generated ABI, coherent rings, ordering, NOP, and limitations |
 | [MEM_COPY command path](docs/mem-copy-command-path.md) | Firmware validation, payload DMA, ordering, and integrity tests |
 | [MEM_FILL command path](docs/mem-fill-command-path.md) | Firmware validation, write-only DMA, ordering, and integrity tests |
@@ -303,8 +308,9 @@ scaffolding and gain tracked files only when their components are built.
   escalation, and management/watchdog reset serialization.
 - Fault injection targets the PCI queue, engine, DMA, interrupt model, and each
   essential firmware task. Mailbox-corruption injection remains planned.
-- The public host API currently exposes device information and synchronous NOP;
-  payload mapping and asynchronous userspace submission remain future work.
+- The public host API exposes every v1 payload operation through per-file
+  contiguous DMA mappings and asynchronous submit/wait. Public cancellation,
+  reset control, scatter/gather mappings, and a stable library remain planned.
 - The provisional development PCI ID is not allocated for production use.
 - One management CPU and one queue pair are deliberately fixed for release 1.
 - No IOMMU model, SR-IOV, secure boot, signed update, or A/B firmware support is

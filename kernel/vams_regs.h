@@ -44,6 +44,8 @@
 #define VAMS_REG_INTR_MASK             0x304U
 #define VAMS_REG_INTR_FORCE            0x308U
 
+#define VAMS_REG_LAST_RESET_REASON     0x610U
+
 #define VAMS_DEVICE_ID_VALUE           0x11001b36U
 #define VAMS_HW_IF_MAJOR_SUPPORTED     1U
 #define VAMS_DESC_VERSION_SUPPORTED    1U
@@ -74,6 +76,9 @@
 
 #define VAMS_DEVICE_ENABLE             BIT(0)
 #define VAMS_DEVICE_QUIESCE            BIT(2)
+
+#define VAMS_RESET_REASON_HOST_DEVICE  1U
+#define VAMS_RESET_REASON_HOST_QUEUE   2U
 
 #define VAMS_QUEUE_ENABLE              BIT(0)
 #define VAMS_QUEUE_RESET               BIT(1)

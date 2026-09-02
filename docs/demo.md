@@ -58,10 +58,11 @@ payload engine, fault controls, and recovery directly through QTest. It does not
 yet package a pinned Linux guest image or run the public driver/userspace API in
 the same invocation. `kernel-smoke` separately boots a disposable Linux guest,
 loads `vams_pci.ko`, exercises MSI-X and polling completion, runs concurrent NOP
-requests, and verifies cleanup.
+and payload requests, validates per-file mapping ownership and close during DMA,
+and verifies cleanup.
 
 The final release demo will compose that guest test with this orchestrator once
-the guest kernel, matching headers, static BusyBox, module, and userspace client
-have reproducible artifact manifests. Payload mapping and asynchronous public
-userspace commands must also exist before the guest can honestly demonstrate
-copy/fill/CRC/vector through `/dev/vamsN`.
+the guest kernel, matching headers, module, project-owned static init/client,
+and initramfs recipe have reproducible artifact manifests. The separate guest
+already demonstrates copy/fill/CRC/vector through `/dev/vamsN`; composition and
+artifact pinning are the remaining release work.

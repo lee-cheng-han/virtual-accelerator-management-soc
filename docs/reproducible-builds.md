@@ -47,7 +47,7 @@ archive their evidence.
 
 The source inputs and QEMU transformation are content-pinned. Host packages,
 the RISC-V compiler binary, Zephyr Python wheels, Linux kernel/header pair, and
-BusyBox guest artifact are not yet all stored in a hash-locked manifest. Until
+guest initramfs tools are not yet all stored in a hash-locked manifest. Until
 they are, builds are repeatable from exact sources but are not claimed to be
 bit-identical across distributions. The runtime demo remains deterministic in
 behavior and records enough identity data to reproduce its environment.

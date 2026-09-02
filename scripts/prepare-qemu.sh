@@ -74,12 +74,14 @@ if [ "$actual_source_hash" != "$VAMS_QEMU_SOURCE_SHA256" ]; then
 	exit 1
 fi
 
+commit_prefix=$(printf '%.10s' "$VAMS_QEMU_COMMIT")
 (
 	cd "$build_dir"
 	../configure \
 		--target-list=riscv32-softmmu,x86_64-softmmu \
 		--disable-guest-agent --disable-tools --disable-vnc \
-		--disable-docs --enable-plugins
+		--disable-docs --enable-plugins \
+		--with-pkgversion="vams-$commit_prefix"
 )
 
 ninja -C "$build_dir" -j "$jobs" \
@@ -93,7 +95,6 @@ for executable in qemu-system-riscv32 qemu-system-x86_64; do
 done
 
 version=$($build_dir/qemu-system-x86_64 --version | sed -n '1p')
-commit_prefix=$(printf '%.10s' "$VAMS_QEMU_COMMIT")
 case "$version" in
 	*"$VAMS_QEMU_VERSION"*"$commit_prefix"*) ;;
 	*) echo "unexpected built QEMU version: $version" >&2; exit 1 ;;

@@ -90,10 +90,11 @@ retains reset-cause telemetry. Secure boot is out of scope.
 
 ## Host stack and queues
 
-The initial `/dev/vamsN` API provides versioned device information and tracked
-synchronous NOP submission. `libvams`, `vamsctl`, and the benchmark will build
-on it as payload ownership is implemented. The thin `vams_pci` driver owns PCI enable,
-64-bit DMA mask negotiation, coherent ring allocation, payload mapping, MSI-X,
+The `/dev/vamsN` API provides versioned device information, tracked synchronous
+NOP, per-file registered buffers, asynchronous payload submit/wait, and
+readiness polling. `libvams`, `vamsctl`, and the benchmark will build on this
+ownership-safe interface. The thin `vams_pci` driver owns PCI enable, 64-bit DMA
+mask negotiation, coherent ring allocation, payload mapping, MSI-X,
 backpressure, reset serialization, and process cleanup. It does not validate
 opcode-specific policy or schedule commands.
 
